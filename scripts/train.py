@@ -14,6 +14,8 @@ Run training::
 from __future__ import annotations
 
 import argparse
+import os
+from pathlib import Path
 
 from simple_rl_research.config import TrainConfig
 from simple_rl_research.trainer.reinforce_trainer import ReinforceTrainer
@@ -26,8 +28,37 @@ def parse_args():
 
 
 def main():
-    _ = parse_args()
-    cfg = TrainConfig()  # default config – user can extend via hydra later
+    args = parse_args()
+
+    # ------------------------------------------------------------------
+    # Build training configuration
+    # ------------------------------------------------------------------
+    if args.config is not None:
+        from omegaconf import OmegaConf
+        from simple_rl_research.config import RewardConfig
+
+        # ------------------------------------------------------------------
+        # Resolve config path – treat bare filenames as relative to the package
+        # config directory so the CLI call can be:
+        #     python scripts/train.py --config minimal_training.yaml
+        # ------------------------------------------------------------------
+        config_path = Path(args.config)
+        if not config_path.is_absolute() and not config_path.exists():
+            pkg_cfg_dir = Path(__file__).resolve().parent.parent / "simple_rl_research" / "config"
+            candidate = pkg_cfg_dir / config_path
+            if candidate.exists():
+                config_path = candidate
+        user_cfg_raw = OmegaConf.load(config_path)
+        user_cfg = OmegaConf.to_container(user_cfg_raw, resolve=True)
+
+        # convert reward dicts → RewardConfig dataclasses for type-safety
+        if "rewards" in user_cfg:
+            user_cfg["rewards"] = [RewardConfig(**rw) for rw in user_cfg["rewards"]]
+
+        cfg = TrainConfig(**user_cfg)
+    else:
+        cfg = TrainConfig()
+
     trainer = ReinforceTrainer(cfg)
     trainer.train()
 

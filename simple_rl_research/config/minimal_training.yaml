@@ -1,0 +1,30 @@
+# Minimal training configuration for Quick Tests
+#
+# This YAML file can be passed to ``scripts/train.py --config minimal_training.yaml``
+# (once config loading is enabled) or simply used as a reference when instantiating
+# ``TrainConfig`` via ``OmegaConf`` / ``dataclasses``.
+#
+# Any fields that are *not* specified here will fall back to the defaults defined
+# in ``simple_rl_research.config.TrainConfig``.
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model_name: "Qwen/Qwen3-4B"
+
+# -----------------------------------------------------------------------------
+# Training loop basics
+# -----------------------------------------------------------------------------
+batch_size: 1      # keep memory footprint low for quick sanity-checks
+epochs: 1
+learning_rate: 5e-6
+
+# -----------------------------------------------------------------------------
+# (Optional) Reward setup – demonstrate how to add a single simple reward.
+# Comment out the entire section if you just want to run a dry loop.
+# -----------------------------------------------------------------------------
+rewards:
+  - cls: "regex_penalty"
+    params:
+      target_words: ["badword"]
+      coefficient: 0.1
