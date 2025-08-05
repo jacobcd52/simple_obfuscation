@@ -46,7 +46,7 @@ class RegexPenalty(RewardFunction):
 
         total_penalty = 0.0
         for pattern in self.word_patterns.values():
-            total_penalty += self.coefficient * len(pattern.findall(text_segment))
+            total_penalty += len(pattern.findall(text_segment))
         total_penalty = self._post_process(total_penalty)
         rollout.setdefault("reward_breakdown", {})[self.name] = -total_penalty
         return -total_penalty

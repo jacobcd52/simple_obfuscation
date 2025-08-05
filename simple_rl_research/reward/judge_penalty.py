@@ -124,6 +124,6 @@ class JudgePenalty(RewardFunction):
             score = 0.0
 
         inverted = 1.0 - score
-        penalty = self._post_process(inverted * self.coefficient)
+        penalty = self._post_process(inverted)
         rollout.setdefault("reward_breakdown", {})[self.name] = -penalty
         return -penalty
