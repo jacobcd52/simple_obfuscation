@@ -7,8 +7,9 @@ than raw throughput.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
-import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -33,6 +34,14 @@ def _instantiate_class(path: str, **kwargs):
     module = __import__(".".join(module_path), fromlist=[cls_name])
     cls = getattr(module, cls_name)
     return cls(**kwargs)
+
+
+async def _compute_reward(rwd: RewardFunction, rollout: Dict) -> float:
+    """Helper function to compute reward from either sync or async reward function."""
+    if inspect.iscoroutinefunction(rwd.__call__):
+        return await rwd(rollout)
+    else:
+        return rwd(rollout)
 
 
 class ReinforceTrainer:
@@ -99,7 +108,6 @@ class ReinforceTrainer:
 
         # misc
         self.global_step = 0
-        self.start_time = time.time()
 
     # ------------------------------------------------------------------
     # training loop
@@ -161,19 +169,92 @@ class ReinforceTrainer:
                 # ------------------------------------------------------------------
                 rollouts: List[Dict] = []
                 rewards = []
-                for i, p in enumerate(prompts):
-                    response_text = self.tokenizer.decode(sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                    rollout = {
-                        "prompt": p["prompt"],
-                        "response": response_text,
-                    }
-                    total_reward = 0.0
-                    for rwd in self.rewards:
-                        total_reward += rwd(rollout)
-                    rollout["total_reward"] = total_reward
-                    rollout["logprob_sum"] = logprob_sums[i].item()
-                    rollouts.append(rollout)
-                    rewards.append(total_reward)
+                
+                # Check if any reward functions are async
+                has_async_rewards = any(inspect.iscoroutinefunction(rwd.__call__) for rwd in self.rewards)
+                
+                if has_async_rewards:
+                    # Handle async rewards - batch all calls
+                    async def compute_rewards_async():
+                        # First, collect all rollouts and create tasks
+                        all_async_tasks = []
+                        rollout_data = []
+                        
+                        for i, p in enumerate(prompts):
+                            response_text = self.tokenizer.decode(sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+                            rollout = {
+                                "prompt": p["prompt"],
+                                "response": response_text,
+                            }
+                            rollout_data.append((rollout, i))
+                            
+                            # Create tasks for all async reward functions for this rollout
+                            rollout_async_tasks = []
+                            rollout_sync_rewards = []
+                            
+                            for rwd in self.rewards:
+                                if inspect.iscoroutinefunction(rwd.__call__):
+                                    task = rwd(rollout)
+                                    rollout_async_tasks.append(task)
+                                    all_async_tasks.append(task)
+                                else:
+                                    # For sync rewards, compute them immediately
+                                    sync_reward = rwd(rollout)
+                                    rollout_sync_rewards.append(sync_reward)
+                            
+                            # Store sync rewards for later use
+                            rollout["_sync_rewards"] = rollout_sync_rewards
+                            rollout["_async_tasks"] = rollout_async_tasks
+                        
+                        # Now await all async tasks in parallel
+                        if all_async_tasks:
+                            async_results = await asyncio.gather(*all_async_tasks, return_exceptions=True)
+                            
+                            # Map results back to tasks
+                            task_results = dict(zip(all_async_tasks, async_results))
+                        
+                        # Process results
+                        rewards_list = []
+                        
+                        for i, (rollout, original_idx) in enumerate(rollout_data):
+                            total_reward = sum(rollout["_sync_rewards"])  # Add sync rewards
+                            
+                            # Add async rewards
+                            for task in rollout["_async_tasks"]:
+                                result = task_results[task]
+                                if isinstance(result, Exception):
+                                    print(f"[Warning] Async reward failed: {result}")
+                                    total_reward += 0.0
+                                else:
+                                    total_reward += result
+                            
+                            # Clean up temporary data
+                            del rollout["_sync_rewards"]
+                            del rollout["_async_tasks"]
+                            
+                            rollout["total_reward"] = total_reward
+                            rollout["logprob_sum"] = logprob_sums[original_idx].item()
+                            rollouts.append(rollout)
+                            rewards_list.append(total_reward)
+                        
+                        return rewards_list
+                    
+                    rewards = asyncio.run(compute_rewards_async())
+                else:
+                    # Handle sync rewards (original logic)
+                    for i, p in enumerate(prompts):
+                        response_text = self.tokenizer.decode(sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+                        rollout = {
+                            "prompt": p["prompt"],
+                            "response": response_text,
+                        }
+                        total_reward = 0.0
+                        for rwd in self.rewards:
+                            total_reward += rwd(rollout)
+                        rollout["total_reward"] = total_reward
+                        rollout["logprob_sum"] = logprob_sums[i].item()
+                        rollouts.append(rollout)
+                        rewards.append(total_reward)
 
                 rewards_t = torch.tensor(rewards, device=sequences.device, dtype=torch.float32)
                 baseline = rewards_t.mean()
@@ -206,6 +287,3 @@ class ReinforceTrainer:
                 self.global_step += 1
 
             # end epoch
-
-        total_time = time.time() - self.start_time
-        print(f"Training finished in {total_time/60:.1f} min – steps: {self.global_step}")

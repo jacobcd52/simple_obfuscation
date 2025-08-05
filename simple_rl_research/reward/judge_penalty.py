@@ -107,7 +107,7 @@ class JudgePenalty(RewardFunction):
     # concrete implementation
     # ------------------------------------------------------------------
 
-    def __call__(self, rollout: Dict) -> float:  # noqa: D401 – imperative style
+    async def __call__(self, rollout: Dict) -> float:  # noqa: D401 – imperative style
         # choose text segment
         if self.apply_on_thinking:
             text_segment = extract_thinking(rollout["response"])
@@ -115,10 +115,9 @@ class JudgePenalty(RewardFunction):
             text_segment = extract_final_output(rollout["response"])
 
         question = rollout.get("prompt", "")
-        # We need to perform an *async* call, but training loop is sync –
-        # we therefore spin up a temporary event loop.
+        # Now we can directly await the judge call since we're async
         try:
-            score = asyncio.run(self.judge(conversation=f"Human: {question}\n\nAssistant: {text_segment}"))
+            score = await self.judge(conversation=f"Human: {question}\n\nAssistant: {text_segment}")
         except Exception as e:
             print("[JudgePenalty] Warning: falling back to 0 –", e)
             score = 0.0

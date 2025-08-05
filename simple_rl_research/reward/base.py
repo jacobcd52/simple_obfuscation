@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Any
 
 
 class RewardFunction(ABC):
@@ -21,8 +21,11 @@ class RewardFunction(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def __call__(self, rollout: Dict) -> float:  # noqa: D401 – imperative style
-        """Compute reward value for *single* rollout."""
+    def __call__(self, rollout: Dict) -> Any:  # noqa: D401 – imperative style
+        """Compute reward value for *single* rollout.
+        
+        Can be implemented as either sync (returning float) or async (returning asyncio.Future[float]).
+        """
 
     # ------------------------------------------------------------------
     # helpers
