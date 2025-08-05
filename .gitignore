@@ -180,8 +180,6 @@ weights/
 
 # Data files
 *.csv
-*.json
-*.jsonl
 *.parquet
 *.h5
 *.hdf5
