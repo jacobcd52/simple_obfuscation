@@ -143,7 +143,18 @@ class ReinforceTrainer:
         for epoch in range(cfg.epochs):
             for _ in range(len(self.prompt_builder)):
                 prompts: List[Dict] = [next(prompt_iter) for _ in range(cfg.batch_size)]
-                prompt_texts = [p["prompt"] for p in prompts]
+
+                # Build chat-formatted prompts using the tokenizer's chat template
+                prompt_texts = []
+                for p in prompts:
+                    # Extract the raw user message (strip any manually-added assistant tag)
+                    user_content = p["prompt"].split("\n<assistant>")[0]
+                    chat_str = self.tokenizer.apply_chat_template(
+                        [{"role": "user", "content": user_content}],
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
+                    prompt_texts.append(chat_str)
 
                 inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
 

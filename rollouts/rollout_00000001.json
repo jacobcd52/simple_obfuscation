@@ -1,6 +1,6 @@
 {
-  "prompt": "Translate 'hello' to Spanish.\n<assistant>\n<think>",
-  "response": "\nOkay, the user wants to translate \"hello\" into Spanish. Let me think. The Spanish word for hello is \"hola\". But wait, sometimes people use \"hola\" as a greeting, but there's also \"buenos d\u00edas\" for good morning. However, \"hola\" is more general and commonly used. I should check if there's any other possible translation. Maybe \"saludos\"? No, that's more like \"greetings\" in a formal context. The most straightforward answer is \"hola\". I should confirm that there's no regional variation. In most Spanish-speaking countries, \"hola\" is the standard. So the translation is \"hola\".\n</think>\n\nThe Spanish translation of \"hello\" is **\"hola\"**.",
+  "prompt": "Translate 'hello' to Spanish.\n<assistant>",
+  "response": "<think>\nOkay, the user wants to translate 'hello' to Spanish. Let me think. The most common translation is 'hola'. But wait, are there other possibilities? Like 'saludos' is more formal. But 'hola' is the standard greeting. Maybe I should check if there's any context needed. The user just said 'hello', so probably 'hola' is the right answer. I should confirm that. Yeah, 'hola' is definitely the correct translation. No need for anything else. Just make sure to present it clearly.\n</think>\n\nThe translation of \"hello\" in Spanish is **\"hola\"**.",
   "reward_breakdown": {
     "regex_penalty": -0.0
   },
