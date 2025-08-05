@@ -89,7 +89,9 @@ class JsonlPromptBuilder(PromptBuilder):
         self.path = Path(path)
         self.input_key = input_key
         self.answer_key = answer_key
-        self.prompt_format = prompt_format or "{input}\n<assistant>"
+        # Include <think> token by default to activate Qwen3 thinking mode during generation
+        # This ensures the model outputs its reasoning within <think>...</think> tags.
+        self.prompt_format = prompt_format or "{input}\n<assistant>\n<think>"
         self.shuffle = shuffle
         random.seed(seed)
 
