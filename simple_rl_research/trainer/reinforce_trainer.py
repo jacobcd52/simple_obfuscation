@@ -29,8 +29,8 @@ from .rollout_store import RolloutStore
 __all__ = ["ReinforceTrainer"]
 
 
-def _instantiate_class(path: str, **kwargs):
-    *module_path, cls_name = path.split(".")
+def _instantiate_class(cls_path: str, **kwargs):
+    *module_path, cls_name = cls_path.split(".")
     module = __import__(".".join(module_path), fromlist=[cls_name])
     cls = getattr(module, cls_name)
     return cls(**kwargs)
@@ -122,12 +122,22 @@ class ReinforceTrainer:
             batch_size=cfg.batch_size,
         )
 
+        # ------------------------------------------------------------------
+        # debug helper
+        # ------------------------------------------------------------------
+        def _debug(name: str, tensor: torch.Tensor):
+            n_nan = torch.isnan(tensor).sum().item()
+            n_inf = torch.isinf(tensor).sum().item()
+            if n_nan or n_inf:
+                print(f"[DEBUG] {name}: nan={n_nan}, inf={n_inf}, shape={tuple(tensor.shape)}, device={tensor.device}")
+        
+
         gen_kwargs = dict(
             logits_processor=[tp],
             max_new_tokens=cfg.output_max_tokens or 512,
             do_sample=True,
             temperature=1.0,
-            output_scores=True,
+            output_scores=False,  # scores not needed; will compute logprobs separately
             return_dict_in_generate=True,
         )
 
@@ -144,25 +154,28 @@ class ReinforceTrainer:
                     generated = self.model.generate(**inputs, **gen_kwargs)
 
                 sequences = generated.sequences  # (batch, seq_len)
-                scores = generated.scores  # list[Tensor] length == new_tokens
 
                 # ------------------------------------------------------------------
-                # compute log-probs for assistant tokens
+                # compute log-probs for assistant tokens via separate forward pass
                 # ------------------------------------------------------------------
-                # stack scores to (batch, tgt_len, vocab)
-                logits = torch.stack(scores, dim=1)  # type: ignore[arg-type]
-                logprobs = F.log_softmax(logits, dim=-1)
+                # Shift inputs/targets for language-modeling likelihood
+                input_ids_full = sequences[:, :-1]
+                target_ids = sequences[:, 1:]
 
-                # gather logprobs of generated tokens (excluding the prompt part)
-                gen_token_ids = sequences[:, inputs["input_ids"].shape[1]:]
-                batch_indices = torch.arange(sequences.size(0)).unsqueeze(-1).to(sequences.device)
-                token_logprobs = logprobs.gather(-1, gen_token_ids.unsqueeze(-1)).squeeze(-1)
+                outputs = self.model(input_ids_full)
+                logits_full = outputs.logits  # (batch, seq_len-1, vocab)
+                _debug('logits_full', logits_full)
+                logprobs_full = F.log_softmax(logits_full, dim=-1)
+                _debug('logprobs_full', logprobs_full)
 
-                # mask to keep only tokens after the <assistant> tag
-                mask = assistant_token_mask(self.tokenizer, sequences)
-                mask = mask[:, inputs["input_ids"].shape[1]:]
+                token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+                _debug('token_logprobs', token_logprobs)
+
+                mask = assistant_token_mask(self.tokenizer, sequences)[:, 1:]  # align with targets
                 selected_logprobs = token_logprobs * mask.float()
+                _debug('selected_logprobs', selected_logprobs)
                 logprob_sums = selected_logprobs.sum(dim=1)
+                _debug('logprob_sums', logprob_sums)
 
                 # ------------------------------------------------------------------
                 # assemble rollouts & compute rewards
@@ -259,7 +272,9 @@ class ReinforceTrainer:
                 rewards_t = torch.tensor(rewards, device=sequences.device, dtype=torch.float32)
                 baseline = rewards_t.mean()
                 reinforce_loss = -(rewards_t - baseline) * logprob_sums
+                _debug('reinforce_loss', reinforce_loss)
                 loss = reinforce_loss.mean()
+                _debug('loss', loss)
 
                 # ------------------------------------------------------------------
                 # backward

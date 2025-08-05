@@ -20,6 +20,12 @@ epochs: 1
 learning_rate: 5e-6
 
 # -----------------------------------------------------------------------------
+# Prompt builder – point to a tiny JSONL file with example prompts.
+# -----------------------------------------------------------------------------
+prompt_builder_params:
+  path: "simple_rl_research/config/minimal_prompts.jsonl"
+
+# -----------------------------------------------------------------------------
 # (Optional) Reward setup – demonstrate how to add a single simple reward.
 # Comment out the entire section if you just want to run a dry loop.
 # -----------------------------------------------------------------------------

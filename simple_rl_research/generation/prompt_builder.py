@@ -31,6 +31,10 @@ class PromptBuilder(ABC):
     def generate(self) -> Iterator[Dict]:
         """Yield prompt dictionaries indefinitely (or until exhaustion)."""
 
+    # Optional – override if the builder supports querying its size
+    def __len__(self) -> int:  # noqa: D401 – simple description
+        raise TypeError(f"{self.__class__.__name__} has no defined length")
+
     # ---------------------------------------------------------------------
     # optional convenience helpers
     # ---------------------------------------------------------------------
@@ -46,6 +50,15 @@ class _ShuffledPromptBuilder(PromptBuilder):
     def __init__(self, inner: PromptBuilder):
         self._inner = inner
         self._cache: Optional[List[Dict]] = None
+
+    def __len__(self) -> int:  # noqa: D401
+        # If we've already cached prompts use that size, else delegate
+        if self._cache is not None:
+            return len(self._cache)
+        try:
+            return len(self._inner)  # type: ignore[arg-type]
+        except TypeError:
+            raise TypeError("Length not defined for wrapped PromptBuilder") from None
 
     def generate(self) -> Iterator[Dict]:
         if self._cache is None:
@@ -82,6 +95,13 @@ class JsonlPromptBuilder(PromptBuilder):
 
         if not self.path.exists():
             raise FileNotFoundError(self.path)
+
+    def __len__(self) -> int:  # noqa: D401 – simple description
+        # Cache length to avoid re-scanning the file repeatedly
+        if not hasattr(self, "_len_cache"):
+            with self.path.open() as fp:
+                self._len_cache = sum(1 for _ in fp)
+        return self._len_cache  # type: ignore[attr-defined]
 
     def _load_lines(self) -> List[dict]:
         data: List[dict] = []
