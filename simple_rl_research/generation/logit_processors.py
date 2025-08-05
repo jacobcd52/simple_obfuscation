@@ -47,6 +47,8 @@ class BatchThinkingTokenBudgetProcessor(LogitsProcessor):
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:  # noqa: N802
         batch_size = scores.shape[0]
         for batch_idx in range(batch_size):
+            # debug for NaN/Inf in incoming scores before modification
+
             if batch_idx >= len(self.tokens_generated):
                 self.tokens_generated.extend([0] * (batch_size - len(self.tokens_generated)))
                 self.stopped_thinking.extend([False] * (batch_size - len(self.stopped_thinking)))
@@ -75,4 +77,6 @@ class BatchThinkingTokenBudgetProcessor(LogitsProcessor):
             if not self.stopped_thinking[batch_idx] and self.tokens_generated[batch_idx] < self.min_thinking_tokens:
                 for tid in self.think_end_tokens:
                     scores[batch_idx][tid] = self.neg_inf
+        # final sanity check
+
         return scores

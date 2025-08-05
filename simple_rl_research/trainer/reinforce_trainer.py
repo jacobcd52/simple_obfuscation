@@ -62,7 +62,7 @@ class ReinforceTrainer:
         if self.tokenizer.pad_token is None:
             # Many GPT-style tokenizers lack a pad token; use eos as fallback.
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(cfg.model_name, torch_dtype=torch.float16)
+        self.model = AutoModelForCausalLM.from_pretrained(cfg.model_name, torch_dtype=torch.bfloat16)
 
         # ------------------------------------------------------------------
         # prompt builder
@@ -125,11 +125,8 @@ class ReinforceTrainer:
         # ------------------------------------------------------------------
         # debug helper
         # ------------------------------------------------------------------
-        def _debug(name: str, tensor: torch.Tensor):
-            n_nan = torch.isnan(tensor).sum().item()
-            n_inf = torch.isinf(tensor).sum().item()
-            if n_nan or n_inf:
-                print(f"[DEBUG] {name}: nan={n_nan}, inf={n_inf}, shape={tuple(tensor.shape)}, device={tensor.device}")
+        def _debug(*args, **kwargs):
+            return
         
 
         gen_kwargs = dict(
@@ -150,7 +147,7 @@ class ReinforceTrainer:
 
                 inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
 
-                with torch.no_grad():
+                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                     generated = self.model.generate(**inputs, **gen_kwargs)
 
                 sequences = generated.sequences  # (batch, seq_len)
@@ -162,7 +159,8 @@ class ReinforceTrainer:
                 input_ids_full = sequences[:, :-1]
                 target_ids = sequences[:, 1:]
 
-                outputs = self.model(input_ids_full)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    outputs = self.model(input_ids_full)
                 logits_full = outputs.logits  # (batch, seq_len-1, vocab)
                 _debug('logits_full', logits_full)
                 logprobs_full = F.log_softmax(logits_full, dim=-1)
