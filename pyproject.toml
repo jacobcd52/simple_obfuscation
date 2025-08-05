@@ -1,0 +1,19 @@
+[project]
+name = "simple-rl-research"
+version = "0.1.0"
+description = "Research framework for REINFORCE fine-tuning of reasoning-style LLMs."
+readme = "README.md"
+authors = [{name = "Researcher"}]
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "transformers>=4.40",
+  "accelerate>=0.27",
+  "wandb>=0.16",
+  "omegaconf>=2.3",
+  "rich>=13.7",
+  "openai>=1.14",
+]
+
+[tool.uv]
+# Uses *uv* for extremely fast lock-file creation and installation.
