@@ -1,18 +1,20 @@
-"""Judge-based penalty as RewardFunction wrapper.
+"""Judge-based reward implemented as a *RewardFunction* wrapper.
 
-We largely embed the reference implementation verbatim.  Only minor
-changes: expose *apply_on_thinking* flag and conform to the RewardFunction
-interface so that the training-loop can treat it uniformly.
+We call an external LLM *judge* to score the assistant's answer between
+0 and 1 (reference implementation).  The final reward is ``1 - score`` so
+that *higher* values correspond to better answers.
+
+Penalties can be obtained by passing a negative ``coefficient`` during
+initialisation.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict
 
 from .base import RewardFunction
 from ..utils import extract_final_output, extract_thinking
 
-import asyncio
 import math
 from openai import AsyncOpenAI
 
@@ -25,8 +27,6 @@ MAX_SCORE = 1
 JUDGE_PROMPT_TEMPLATE = (
     "Here's a conversation: {conversation}\n\n TODO TODO TODO"
 )
-
-JUDGE_PROMPT_TEMPLATE_COT = JUDGE_PROMPT_TEMPLATE
 
 
 class OpenAiJudge:
@@ -80,28 +80,27 @@ class OpenAiJudge:
 # ---------------------------------------------------------------------------
 
 
-class JudgePenalty(RewardFunction):
-    name = "judge_penalty"
+class JudgeReward(RewardFunction):
+    name = "judge_reward"
 
     def __init__(
         self,
         *,
         model: str = "gpt-4o-mini",
-        coefficient: float = 0.1,
-        apply_on_thinking: bool = False,
+        coefficient: float = 1.0,
+        log_thinking: bool = False,
         prompt_template: str | None = None,
     ) -> None:
-        super().__init__(coefficient=coefficient, max_clip=None)
+        super().__init__(coefficient=coefficient, max_clip=None, log_thinking=log_thinking)
         self.judge = OpenAiJudge(model, prompt_template)
-        self.apply_on_thinking = apply_on_thinking
 
     # ------------------------------------------------------------------
     # concrete implementation
     # ------------------------------------------------------------------
 
-    async def __call__(self, rollout: Dict) -> float:  # noqa: D401 – imperative style
+    async def __call__(self, rollout: Dict, *, on_thinking: bool = False) -> float:  # noqa: D401 – imperative style
         # choose text segment
-        if self.apply_on_thinking:
+        if on_thinking:
             text_segment = extract_thinking(rollout["response"])
         else:
             text_segment = extract_final_output(rollout["response"])
@@ -111,10 +110,29 @@ class JudgePenalty(RewardFunction):
         try:
             score = await self.judge(conversation=f"Human: {question}\n\nAssistant: {text_segment}")
         except Exception as e:
-            print("[JudgePenalty] Warning: falling back to 0 –", e)
+            print("[JudgeReward] Warning: falling back to 0 –", e)
             score = 0.0
 
-        inverted = 1.0 - score
-        penalty = self._post_process(inverted)
-        rollout.setdefault("reward_breakdown", {})[self.name] = -penalty
-        return -penalty
+        raw_reward = 1.0 - score  # higher is better
+        reward = self._post_process(raw_reward)
+
+        key = self.name if not on_thinking else f"{self.name}_thinking"
+        rollout.setdefault("reward_breakdown", {})[key] = reward
+
+        # Optionally compute reward on thinking part for logging
+        if self.log_thinking and not on_thinking:
+            thinking_text = extract_thinking(rollout["response"])
+            try:
+                thinking_score = await self.judge(conversation=f"Human: {question}\n\nAssistant: {thinking_text}")
+            except Exception:
+                thinking_score = 0.0
+            raw_thinking = 1.0 - thinking_score
+            rollout["reward_breakdown"][f"{self.name}_thinking"] = self._post_process(raw_thinking)
+
+        return reward
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat alias
+# ---------------------------------------------------------------------------
+JudgePenalty = JudgeReward

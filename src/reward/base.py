@@ -12,9 +12,31 @@ class RewardFunction(ABC):
     #: key under which the concrete reward logs its value (e.g. wandb)
     name: str = "reward"
 
-    def __init__(self, coefficient: float = 1.0, max_clip: float | None = None):
+    def __init__(
+        self,
+        *,
+        coefficient: float = 1.0,
+        max_clip: float | None = None,
+        log_thinking: bool = False,
+    ) -> None:
+        """Create a new reward instance.
+
+        Parameters
+        ----------
+        coefficient
+            Scalar applied to the raw reward.  Use a negative value to turn a
+            *reward* into a *penalty* via sign flip.
+        max_clip
+            If given, the reward's absolute value is clipped to this bound *after*
+            applying ``coefficient``.
+        log_thinking
+            If ``True``, the reward will *also* be computed on the model's
+            <think>…</think> content for logging.  The logged value is stored in
+            ``rollout['reward_breakdown']`` under the key ``f"{self.name}_thinking"``.
+        """
         self.coefficient = coefficient
         self.max_clip = max_clip
+        self.log_thinking = log_thinking
 
     # ------------------------------------------------------------------
     # public API

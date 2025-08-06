@@ -9,14 +9,14 @@ from __future__ import annotations
 from typing import Dict, Type
 
 from .base import RewardFunction
-from .regex_penalty import RegexPenalty
-from .judge_penalty import JudgePenalty
+from .regex_reward import RegexReward
+from .judge_reward import JudgeReward
 
 from .boxed_answer_reward import BoxedAnswerReward  # noqa: F401  – optional
 
 _REGISTRY: Dict[str, Type[RewardFunction]] = {
-    "regex_penalty": RegexPenalty,
-    "judge_penalty": JudgePenalty,
+    "regex_reward": RegexReward,
+    "judge_reward": JudgeReward,
 }
 
 _REGISTRY["boxed_answer"] = BoxedAnswerReward

@@ -300,17 +300,29 @@ class ReinforceTrainer:
                 # ------------------------------------------------------------------
                 # logging & storage
                 # ------------------------------------------------------------------
+                # Store rollouts
                 for rollout in rollouts:
                     self.rollout_store.save(rollout)
-                wandb.log(
-                    {
-                        "loss": loss.item(),
-                        "reward_mean": baseline.item(),
-                        "epoch": epoch,
-                        "global_step": self.global_step,
-                    },
-                    step=self.global_step,
-                )
+
+                # ------------------------------------------------------------------
+                # Aggregate reward breakdowns (mean over batch) for logging
+                # ------------------------------------------------------------------
+                breakdown_totals = {}
+                for rollout in rollouts:
+                    for k, v in rollout.get("reward_breakdown", {}).items():
+                        breakdown_totals[k] = breakdown_totals.get(k, 0.0) + v
+                breakdown_means = {f"reward/{k}": v / len(rollouts) for k, v in breakdown_totals.items()}
+
+                # Main scalars
+                log_dict = {
+                    "loss": loss.item(),
+                    "reward_mean": baseline.item(),
+                    "epoch": epoch,
+                    "global_step": self.global_step,
+                }
+                log_dict.update(breakdown_means)
+
+                wandb.log(log_dict, step=self.global_step)
 
                 self.global_step += 1
 

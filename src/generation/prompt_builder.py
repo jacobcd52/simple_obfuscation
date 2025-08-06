@@ -169,8 +169,8 @@ class MmluPromptBuilder(PromptBuilder):
 
     def reformat_prompt(self, prompt: str) -> str:
         """Reformat the prompt before yielding it."""
-        prefix = "Immediately write your final answer, in the form \\boxed{your_answer}. Then write a brief explanation of how you got that answer.\n\n"
-        suffix = "\n\nYour answer must be in this format:\n\n### Answer\n\\boxed{your_answer}\n\n### Explanation\nyour_explanation"
+        prefix = "Immediately write the letter A, B, C, or D corresponding to your final answer, in the format \\boxed{your_answer_letter}. Then write a brief explanation of how you got that answer.\n\n"
+        suffix = "\n\nYour answer must be in this format:\n\n### Answer\n\\boxed{your_answer_letter}\n\n### Explanation\nyour_explanation"
         return prefix + prompt + suffix
 
     def generate(self) -> Iterator[Dict]:
@@ -191,7 +191,7 @@ class MmluPromptBuilder(PromptBuilder):
             )
             yield {
                 "prompt": prompt,
-                "answer": choices[answer_idx],
+                "answer": "ABCD"[answer_idx],  # use letter answer for reward
                 "answer_idx": answer_idx,
-                "answer_letter": "ABCD"[answer_idx],
+                "answer_text": choices[answer_idx],
             }

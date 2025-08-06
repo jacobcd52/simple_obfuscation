@@ -2,7 +2,7 @@
 
 model_name: "Qwen/Qwen3-4B"
 
-batch_size: 1 
+batch_size: 2
 epochs: 1
 learning_rate: 5e-6
 thinking_max_tokens: 128
@@ -17,9 +17,14 @@ prompt_builder_params:
   split: "test"
 
 rewards:
-  - cls: "regex_penalty"
+  - cls: "regex_reward"
     params:
-      target_words: ["question"]
-      coefficient: 0.1
+      target_words: ["group", "modulo", "mod"]
+      coefficient: -1.0
+      max_clip: 2.0
+      log_thinking: true
 
   - cls: "boxed_answer"
+    params:
+      coefficient: 1.0
+      log_thinking: false
