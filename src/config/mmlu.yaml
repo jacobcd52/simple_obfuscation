@@ -5,7 +5,7 @@
 # ``TrainConfig`` via ``OmegaConf`` / ``dataclasses``.
 #
 # Any fields that are *not* specified here will fall back to the defaults defined
-# in ``simple_rl_research.config.TrainConfig``.
+# in ``src.config.TrainConfig``.
 
 # -----------------------------------------------------------------------------
 # Model
@@ -20,10 +20,12 @@ epochs: 1
 learning_rate: 5e-6
 
 # -----------------------------------------------------------------------------
-# Prompt builder – point to a tiny JSONL file with example prompts.
+# Prompt builder – use the built-in MMLU dataset (abstract algebra subject).
 # -----------------------------------------------------------------------------
+prompt_builder_cls: "src.generation.prompt_builder.MmluPromptBuilder"
 prompt_builder_params:
-  path: "simple_rl_research/config/minimal_prompts.jsonl"
+  subject: "abstract_algebra"
+  split: "test"
 
 # -----------------------------------------------------------------------------
 # (Optional) Reward setup – demonstrate how to add a single simple reward.
@@ -32,5 +34,5 @@ prompt_builder_params:
 rewards:
   - cls: "regex_penalty"
     params:
-      target_words: ["badword"]
+      target_words: ["question"]
       coefficient: 0.1

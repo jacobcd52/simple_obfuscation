@@ -2,7 +2,7 @@ import torch
 import pytest
 from transformers import AutoTokenizer
 
-from simple_rl_research.generation.logit_processors import BatchThinkingTokenBudgetProcessor
+from src.generation.logit_processors import BatchThinkingTokenBudgetProcessor
 
 
 @pytest.mark.parametrize("batch_size,vocab_subset", [(2, 5000)])

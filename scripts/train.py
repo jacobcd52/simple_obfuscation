@@ -17,8 +17,8 @@ import argparse
 import os
 from pathlib import Path
 
-from simple_rl_research.config import TrainConfig
-from simple_rl_research.trainer.reinforce_trainer import ReinforceTrainer
+from src.config import TrainConfig
+from src.trainer.reinforce_trainer import ReinforceTrainer
 
 
 def parse_args():
@@ -35,7 +35,7 @@ def main():
     # ------------------------------------------------------------------
     if args.config is not None:
         from omegaconf import OmegaConf
-        from simple_rl_research.config import RewardConfig
+        from src.config import RewardConfig
 
         # ------------------------------------------------------------------
         # Resolve config path – treat bare filenames as relative to the package
@@ -44,7 +44,7 @@ def main():
         # ------------------------------------------------------------------
         config_path = Path(args.config)
         if not config_path.is_absolute() and not config_path.exists():
-            pkg_cfg_dir = Path(__file__).resolve().parent.parent / "simple_rl_research" / "config"
+            pkg_cfg_dir = Path(__file__).resolve().parent.parent / "src" / "config"
             candidate = pkg_cfg_dir / config_path
             if candidate.exists():
                 config_path = candidate

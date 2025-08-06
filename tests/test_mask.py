@@ -1,7 +1,7 @@
 """Tests for *assistant_token_mask* utility."""
 
 import torch
-from simple_rl_research.utils import assistant_token_mask
+from src.utils import assistant_token_mask
 from transformers import AutoTokenizer
 
 

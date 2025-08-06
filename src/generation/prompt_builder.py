@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from datasets import load_dataset
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -11,6 +12,7 @@ from typing import Dict, Iterator, List, Optional
 __all__ = [
     "PromptBuilder",
     "JsonlPromptBuilder",
+    "MmluPromptBuilder",
 ]
 
 
@@ -120,3 +122,61 @@ class JsonlPromptBuilder(PromptBuilder):
             if self.answer_key and self.answer_key in row:
                 meta["answer"] = row[self.answer_key]
             yield {"prompt": prompt, **meta}
+
+
+class MmluPromptBuilder(PromptBuilder):
+    """PromptBuilder for the HuggingFace `cais/mmlu` dataset."""
+
+    def __init__(
+        self,
+        subject: str = "abstract_algebra",
+        *,
+        split: str = "test",
+        prompt_format: str | None = None,
+        shuffle: bool = True,
+        seed: int = 0,
+    ) -> None:
+        super().__init__()
+        self.subject = subject
+        self.split = split
+        self.prompt_format = prompt_format or (
+            "{question}\n"
+            "A. {A}\n"
+            "B. {B}\n"
+            "C. {C}\n"
+            "D. {D}\n"
+            "<assistant>"
+        )
+        self.shuffle = shuffle
+        random.seed(seed)
+
+        # Load the requested subject split from the MMLU dataset
+        self._dataset = load_dataset("cais/mmlu", subject, split=split)
+        if self.shuffle:
+            self._dataset = self._dataset.shuffle(seed=seed)
+
+    def __len__(self) -> int:  # noqa: D401 – simple description
+        return len(self._dataset)
+
+    def generate(self) -> Iterator[Dict]:
+        for row in self._dataset:
+            choices = row["choices"]
+            answer_label = row["answer"]  # int 0-3 or letters "A"-"D"
+            if isinstance(answer_label, str):
+                answer_idx = "ABCD".index(answer_label.upper())
+            else:
+                answer_idx = int(answer_label)
+            prompt = self.prompt_format.format(
+                input=row["question"],  # maintain compatibility with other builders
+                question=row["question"],
+                A=choices[0],
+                B=choices[1],
+                C=choices[2],
+                D=choices[3],
+            )
+            yield {
+                "prompt": prompt,
+                "answer": choices[answer_idx],
+                "answer_idx": answer_idx,
+                "answer_letter": "ABCD"[answer_idx],
+            }

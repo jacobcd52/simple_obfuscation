@@ -19,7 +19,7 @@ class RewardConfig:
     """Configuration for a single reward (or penalty) component."""
 
     # dotted import path of the concrete reward class, e.g.
-    # ``simple_rl_research.reward.regex_penalty.RegexPenalty``
+    # ``src.reward.regex_penalty.RegexPenalty``
     cls: str
     # free-form kwargs passed directly to the constructor
     params: dict = field(default_factory=dict)
@@ -41,7 +41,7 @@ class TrainConfig:
     # ----------------------------------------------------------------------------
     # prompt construction
     # ----------------------------------------------------------------------------
-    prompt_builder_cls: str = "simple_rl_research.generation.prompt_builder.JsonlPromptBuilder"
+    prompt_builder_cls: str = "src.generation.prompt_builder.JsonlPromptBuilder"
     prompt_builder_params: dict = field(default_factory=dict)
 
     # ----------------------------------------------------------------------------
