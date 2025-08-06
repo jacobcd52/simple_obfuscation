@@ -20,7 +20,7 @@ class RewardConfig:
 
     # dotted import path of the concrete reward class, e.g.
     # ``src.reward.regex_penalty.RegexPenalty``
-    cls: str
+    cls: str = "boxed_answer"
     # free-form kwargs passed directly to the constructor
     params: dict = field(default_factory=dict)
 
@@ -29,24 +29,16 @@ class RewardConfig:
 class TrainConfig:
     """Top-level training configuration."""
 
-    # ----------------------------------------------------------------------------
-    # model / tokeniser
-    # ----------------------------------------------------------------------------
-    model_name: str = "Qwen/Qwen1_5-4B"
-
-    # Padding must be *left* for causal models when using generate with max_length
+    # model / tokenizer
+    model_name: str = "Qwen/Qwen3-4B"
     padding_side: str = "left"
     enable_thinking: bool = True  # pass to tokenizer
 
-    # ----------------------------------------------------------------------------
     # prompt construction
-    # ----------------------------------------------------------------------------
     prompt_builder_cls: str = "src.generation.prompt_builder.JsonlPromptBuilder"
     prompt_builder_params: dict = field(default_factory=dict)
 
-    # ----------------------------------------------------------------------------
     # RL specific
-    # ----------------------------------------------------------------------------
     batch_size: int = 2
     grad_accum_steps: int = 1
     epochs: int = 1
@@ -62,9 +54,7 @@ class TrainConfig:
     # reward setup – list allows arbitrarily many (task reward + penalties)
     rewards: List[RewardConfig] = field(default_factory=list)
 
-    # ----------------------------------------------------------------------------
     # logging / checkpointing
-    # ----------------------------------------------------------------------------
     wandb_project: str = "simple-rl-research"
     wandb_run_name: Optional[str] = None
 
@@ -72,7 +62,5 @@ class TrainConfig:
     save_to_hf_hub: bool = False
     hf_repo: Optional[str] = None  # organisation/repo name when uploading
 
-    # ----------------------------------------------------------------------------
     # multi-GPU
-    # ----------------------------------------------------------------------------
     multi_gpu: str = "none"  # "none" | "ddp" | "fsdp"

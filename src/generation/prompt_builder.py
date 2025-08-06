@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import random
-from datasets import load_dataset
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
+
+from datasets import load_dataset
 
 __all__ = [
     "PromptBuilder",
@@ -27,11 +28,17 @@ class PromptBuilder(ABC):
     """
 
     def __iter__(self) -> Iterator[Dict]:
-        return self.generate()
+        for item in self.generate():
+            item["prompt"] = self.reformat_prompt(item["prompt"])
+            yield item
 
     @abstractmethod
     def generate(self) -> Iterator[Dict]:
         """Yield prompt dictionaries indefinitely (or until exhaustion)."""
+
+    def reformat_prompt(self, prompt: str) -> str:
+        """Reformat the prompt before yielding it."""
+        return prompt
 
     # Optional – override if the builder supports querying its size
     def __len__(self) -> int:  # noqa: D401 – simple description
@@ -61,6 +68,9 @@ class _ShuffledPromptBuilder(PromptBuilder):
             return len(self._inner)  # type: ignore[arg-type]
         except TypeError:
             raise TypeError("Length not defined for wrapped PromptBuilder") from None
+
+    def reformat_prompt(self, prompt: str) -> str:
+        return self._inner.reformat_prompt(prompt)
 
     def generate(self) -> Iterator[Dict]:
         if self._cache is None:
@@ -144,8 +154,7 @@ class MmluPromptBuilder(PromptBuilder):
             "A. {A}\n"
             "B. {B}\n"
             "C. {C}\n"
-            "D. {D}\n"
-            "<assistant>"
+            "D. {D}"
         )
         self.shuffle = shuffle
         random.seed(seed)
@@ -157,6 +166,12 @@ class MmluPromptBuilder(PromptBuilder):
 
     def __len__(self) -> int:  # noqa: D401 – simple description
         return len(self._dataset)
+
+    def reformat_prompt(self, prompt: str) -> str:
+        """Reformat the prompt before yielding it."""
+        prefix = "Immediately write your final answer, in the form \\boxed{your_answer}. Then write a brief explanation of how you got that answer.\n\n"
+        suffix = "\n\nYour answer must be in this format:\n\n### Answer\n\\boxed{your_answer}\n\n### Explanation\nyour_explanation"
+        return prefix + prompt + suffix
 
     def generate(self) -> Iterator[Dict]:
         for row in self._dataset:

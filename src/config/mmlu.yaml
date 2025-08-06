@@ -1,38 +1,25 @@
-# Minimal training configuration for Quick Tests
-#
-# This YAML file can be passed to ``scripts/train.py --config minimal_training.yaml``
-# (once config loading is enabled) or simply used as a reference when instantiating
-# ``TrainConfig`` via ``OmegaConf`` / ``dataclasses``.
-#
-# Any fields that are *not* specified here will fall back to the defaults defined
-# in ``src.config.TrainConfig``.
+# Run python scripts/train.py --config mmlu.yaml
 
-# -----------------------------------------------------------------------------
-# Model
-# -----------------------------------------------------------------------------
 model_name: "Qwen/Qwen3-4B"
 
-# -----------------------------------------------------------------------------
-# Training loop basics
-# -----------------------------------------------------------------------------
-batch_size: 1      # keep memory footprint low for quick sanity-checks
+batch_size: 1 
 epochs: 1
 learning_rate: 5e-6
+thinking_max_tokens: 128
+output_max_tokens: 256
 
-# -----------------------------------------------------------------------------
+wandb_project: "mmlu spillover"
+
 # Prompt builder – use the built-in MMLU dataset (abstract algebra subject).
-# -----------------------------------------------------------------------------
 prompt_builder_cls: "src.generation.prompt_builder.MmluPromptBuilder"
 prompt_builder_params:
   subject: "abstract_algebra"
   split: "test"
 
-# -----------------------------------------------------------------------------
-# (Optional) Reward setup – demonstrate how to add a single simple reward.
-# Comment out the entire section if you just want to run a dry loop.
-# -----------------------------------------------------------------------------
 rewards:
   - cls: "regex_penalty"
     params:
       target_words: ["question"]
       coefficient: 0.1
+
+  - cls: "boxed_answer"

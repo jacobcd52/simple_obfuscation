@@ -74,9 +74,14 @@ class ReinforceTrainer:
         # ------------------------------------------------------------------
         # rewards
         # ------------------------------------------------------------------
-        from ..reward.registry import get_reward_class  # local import to avoid circular
+        from ..reward import get_reward_class  # local import to avoid circular
 
         self.rewards: List[RewardFunction] = []
+        # if no rewards specified, use default BoxedAnswerReward
+        if not cfg.rewards:
+            cls = get_reward_class("boxed_answer")
+            self.rewards.append(cls())
+
         for rw in cfg.rewards:
             if "." in rw.cls:
                 cls = _instantiate_class(rw.cls, **rw.params)
@@ -144,6 +149,9 @@ class ReinforceTrainer:
             for _ in range(len(self.prompt_builder)):
                 prompts: List[Dict] = [next(prompt_iter) for _ in range(cfg.batch_size)]
 
+                # Reset the logit processor state for the new batch
+                tp.reset()
+
                 # Build chat-formatted prompts using the tokenizer's chat template
                 prompt_texts = []
                 for p in prompts:
@@ -204,10 +212,8 @@ class ReinforceTrainer:
                         
                         for i, p in enumerate(prompts):
                             response_text = self.tokenizer.decode(sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                            rollout = {
-                                "prompt": p["prompt"],
-                                "response": response_text,
-                            }
+                            rollout = dict(p)  # include 'answer' and other metadata
+                            rollout["response"] = response_text
                             rollout_data.append((rollout, i))
                             
                             # Create tasks for all async reward functions for this rollout
@@ -266,10 +272,8 @@ class ReinforceTrainer:
                     # Handle sync rewards (original logic)
                     for i, p in enumerate(prompts):
                         response_text = self.tokenizer.decode(sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                        rollout = {
-                            "prompt": p["prompt"],
-                            "response": response_text,
-                        }
+                        rollout = dict(p)  # include 'answer' and other metadata
+                        rollout["response"] = response_text
                         total_reward = 0.0
                         for rwd in self.rewards:
                             total_reward += rwd(rollout)

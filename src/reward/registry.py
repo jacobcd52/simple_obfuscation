@@ -12,18 +12,14 @@ from .base import RewardFunction
 from .regex_penalty import RegexPenalty
 from .judge_penalty import JudgePenalty
 
-try:
-    from .task_reward import TaskReward  # noqa: F401  – optional
-except ImportError:  # pragma: no cover
-    TaskReward = None  # type: ignore
+from .boxed_answer_reward import BoxedAnswerReward  # noqa: F401  – optional
 
 _REGISTRY: Dict[str, Type[RewardFunction]] = {
     "regex_penalty": RegexPenalty,
     "judge_penalty": JudgePenalty,
 }
 
-if TaskReward is not None:
-    _REGISTRY["task"] = TaskReward
+_REGISTRY["boxed_answer"] = BoxedAnswerReward
 
 
 def get_reward_class(name: str) -> Type[RewardFunction]:
