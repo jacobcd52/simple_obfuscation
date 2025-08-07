@@ -59,9 +59,11 @@ class TrainConfig:
     wandb_project: str = "simple-rl-research"
     wandb_run_name: Optional[str] = None
 
-    save_every_steps: Optional[int] = None  # disabled by default
-    save_to_hf_hub: bool = False
-    hf_repo: Optional[str] = None  # organisation/repo name when uploading
+    # TODO: Future config options to consider adding:
+    # - save_every_steps: Optional[int] = None  # for model checkpointing
+    # - save_to_hf_hub: bool = False  # for uploading to Hugging Face Hub
+    # - hf_repo: Optional[str] = None  # organisation/repo name when uploading
+    # - max_grad_norm: float = 1.0  # for gradient clipping
 
     # multi-GPU
     multi_gpu: str = "none"  # "none" | "ddp" | "fsdp"

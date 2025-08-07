@@ -12,7 +12,7 @@ multi_gpu: "fsdp"
 wandb_project: "mmlu spillover"
 
 # Prompt builder – use the built-in MMLU dataset (abstract algebra subject).
-prompt_builder_cls: "src.prompt_builders.mmlu_prompt_builder.MmluPromptBuilder"
+prompt_builder_cls: "src.prompt_builders.mmlu.MmluPromptBuilder"
 prompt_builder_params:
   subject: "abstract_algebra"
   split: "test"

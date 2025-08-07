@@ -325,9 +325,9 @@ def generate_rollout_html(number, data):
         data.get("total_reward", 0)
     )
     
-    # Get conversation parts
-    prompt = data.get("prompt", "")
-    response = data.get("response", "")
+    # Get conversation parts and escape HTML tags
+    prompt = data.get("prompt", "").replace("<", "&lt;").replace(">", "&gt;")
+    response = data.get("response", "").replace("<", "&lt;").replace(">", "&gt;")
     
     return f"""
         <div class="rollout-info">
