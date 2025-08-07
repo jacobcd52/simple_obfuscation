@@ -412,6 +412,9 @@ class ReinforceTrainer:
     def train(self):
         cfg = self.cfg
 
+        # Clear all previous rollouts at the start of training
+        self.rollout_store.clear_all_rollouts()
+
         # Build runtime helpers
         tp = self._token_processor()
         gen_kwargs = self._build_gen_kwargs(tp)

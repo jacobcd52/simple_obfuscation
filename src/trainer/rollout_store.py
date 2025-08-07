@@ -20,6 +20,12 @@ class RolloutStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._counter = 0
 
+    def clear_all_rollouts(self):
+        """Delete all JSON files in the rollouts directory."""
+        for json_file in self.dir.glob("*.json"):
+            json_file.unlink()
+        self._counter = 0
+
     # ------------------------------------------------------------------
     # saving
     # ------------------------------------------------------------------
