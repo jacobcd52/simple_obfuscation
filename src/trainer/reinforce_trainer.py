@@ -26,6 +26,29 @@ from ..reward.base import RewardFunction
 from ..utils import zero_special_token_grads
 from .rollout_store import RolloutStore
 
+# ------------------------------------------------------------------
+# Local helper data-structures for better readability
+# ------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import Any, Sequence
+from transformers.tokenization_utils_base import BatchEncoding
+
+@dataclass
+class Batch:
+    """Container holding the information needed for one forward/generation pass."""
+    prompts: List[Dict]
+    prompt_texts: List[str]
+    inputs: Any  # transformers.BatchEncoding – kept generic to avoid importing heavy typing
+
+@dataclass
+class StepOutput:
+    """Results from a single optimisation step (one mini-batch)."""
+    sequences: torch.LongTensor
+    logprob_sums: torch.Tensor
+    rewards: torch.Tensor
+    rollouts: List[Dict]
+    loss: torch.Tensor
+
 __all__ = ["ReinforceTrainer"]
 
 
@@ -119,9 +142,6 @@ class ReinforceTrainer:
                 cls = get_reward_class(rw.cls)
                 self.rewards.append(cls(**rw.params))
 
-        # ------------------------------------------------------------------
-        # rollout store
-        # ------------------------------------------------------------------
         self.rollout_store = RolloutStore("rollouts")
 
         # Prepare (wrap) the model for the chosen distributed strategy first
@@ -134,11 +154,6 @@ class ReinforceTrainer:
         # Distribute optimiser
         self.optimizer = self.accelerator.prepare(self.optimizer)
 
-        # logging
-        # ------------------------------------------------------------------
-        # WandB – initialise **once** on the main process.  Other ranks disable
-        # WandB so that only a single run is created.
-        # ------------------------------------------------------------------
         if self.accelerator.is_local_main_process:
             wandb.init(
                 project=cfg.wandb_project,
@@ -153,9 +168,6 @@ class ReinforceTrainer:
         # misc
         self.global_step = 0
 
-        # ------------------------------------------------------------------
-        # Helper: safely access generation on underlying model (handles DDP/FSDP wrappers)
-        # ------------------------------------------------------------------
     def _generate(self, *args, **kwargs):
         """
         Thin wrapper around `model.generate` that works whether
@@ -184,27 +196,20 @@ class ReinforceTrainer:
         # If we reach here something is unexpected
         raise AttributeError("Neither wrapper nor underlying model provide a `generate` method.")
 
-    # ------------------------------------------------------------------
-    # training loop
-    # ------------------------------------------------------------------
-
-    def train(self):
+    def _token_processor(self):
+        """Return a fresh `BatchThinkingTokenBudgetProcessor` configured from `self.cfg`."""
         cfg = self.cfg
-        tp = BatchThinkingTokenBudgetProcessor(
+        return BatchThinkingTokenBudgetProcessor(
             self.tokenizer,
             max_thinking_tokens=cfg.thinking_max_tokens,
             min_thinking_tokens=cfg.thinking_min_tokens,
             batch_size=cfg.batch_size,
         )
 
-        # ------------------------------------------------------------------
-        # debug helper
-        # ------------------------------------------------------------------
-        def _debug(*args, **kwargs):
-            return
-        
-
-        gen_kwargs = dict(
+    def _build_gen_kwargs(self, tp):
+        """Keyword arguments passed to `model.generate`."""
+        cfg = self.cfg
+        return dict(
             logits_processor=[tp],
             max_new_tokens=cfg.output_max_tokens or 512,
             do_sample=True,
@@ -213,213 +218,208 @@ class ReinforceTrainer:
             return_dict_in_generate=True,
         )
 
-        from tqdm import tqdm
+    def _next_batch(self, prompt_iter, tp):
+        """Sample the next batch of prompts and tokenise them."""
+        cfg = self.cfg
+        prompts: List[Dict] = []
+        for _ in range(cfg.batch_size):
+            try:
+                prompts.append(next(prompt_iter))
+            except StopIteration:
+                # Restart the iterator when we reach the end of the prompt set
+                prompt_iter = iter(self.prompt_builder)
+                prompts.append(next(prompt_iter))
+
+        # Reset the logit processor state for the new batch
+        tp.reset()
+
+        # Build chat-formatted prompts using the tokenizer's chat template
+        prompt_texts = []
+        for p in prompts:
+            # Extract the raw user message (strip any manually-added assistant tag)
+            user_content = p["prompt"].split("\n<assistant>")[0]
+            chat_str = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": user_content}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            prompt_texts.append(chat_str)
+
+        inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
+        return Batch(prompts, prompt_texts, inputs), prompt_iter
+
+    def _generate_sequences(self, inputs, gen_kwargs):
+        """Run `model.generate` under autocast & without gradient."""
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            generated = self._generate(**inputs, **gen_kwargs)
+        return generated.sequences  # (batch, seq_len)
+
+    def _compute_logprobs(self, sequences, inputs):
+        """Compute summed log-probabilities of newly generated tokens."""
+        # Shift inputs/targets for language-modeling likelihood
+        input_ids_full = sequences[:, :-1]
+        target_ids = sequences[:, 1:]
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            outputs = self.model(input_ids_full)
+        logits_full = outputs.logits  # (batch, seq_len-1, vocab)
+        logprobs_full = F.log_softmax(logits_full, dim=-1)
+
+        token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+
+        # Mask newly generated tokens (positions >= prompt length)
+        prompt_len = inputs["input_ids"].shape[1]
+        seq_len = sequences.shape[1]
+        mask_full = (
+            torch.arange(seq_len, device=sequences.device)
+            .unsqueeze(0)
+            .expand(sequences.size(0), -1)
+            >= prompt_len
+        )
+        mask = mask_full[:, 1:]  # align with targets
+        selected_logprobs = token_logprobs * mask.float()
+        logprob_sums = selected_logprobs.sum(dim=1)
+        return logprob_sums
+
+    def _compute_rewards(self, prompts, sequences, inputs, logprob_sums):
+        """Compute rewards (handles sync + async) and return rollouts & loss."""
+        rollouts: List[Dict] = []
+        rewards = []
+        # Detect async reward functions once
+        has_async = any(inspect.iscoroutinefunction(rwd.__call__) for rwd in self.rewards)
+
+        if has_async:
+            async def _compute_async():
+                all_async_tasks = []
+                rollout_data = []
+                for i, p in enumerate(prompts):
+                    response_text = self.tokenizer.decode(
+                        sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+                    )
+                    rollout = dict(p)
+                    rollout["response"] = response_text
+                    rollout_sync_rewards = []
+                    rollout_tasks = []
+                    for rwd in self.rewards:
+                        if inspect.iscoroutinefunction(rwd.__call__):
+                            task = rwd(rollout)
+                            rollout_tasks.append(task)
+                            all_async_tasks.append(task)
+                        else:
+                            rollout_sync_rewards.append(rwd(rollout))
+                    rollout["_sync_rewards"] = rollout_sync_rewards
+                    rollout["_async_tasks"] = rollout_tasks
+                    rollout_data.append(rollout)
+
+                async_results = []
+                if all_async_tasks:
+                    async_results = await asyncio.gather(*all_async_tasks, return_exceptions=True)
+                task_results = dict(zip(all_async_tasks, async_results))
+
+                rewards_accum = []
+                for i, rollout in enumerate(rollout_data):
+                    total_reward = sum(rollout["_sync_rewards"])
+                    for task in rollout["_async_tasks"]:
+                        res = task_results.get(task, 0.0)
+                        if isinstance(res, Exception):
+                            print(f"[Warning] Async reward failed: {res}")
+                            res = 0.0
+                        total_reward += res
+                    # Cleanup
+                    rollout.pop("_sync_rewards", None)
+                    rollout.pop("_async_tasks", None)
+                    rollout["total_reward"] = total_reward
+                    rollout["logprob_sum"] = logprob_sums[i].item()
+                    rollouts.append(rollout)
+                    rewards_accum.append(total_reward)
+                return rewards_accum
+
+            rewards = asyncio.run(_compute_async())
+        else:
+            for i, p in enumerate(prompts):
+                response_text = self.tokenizer.decode(
+                    sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+                )
+                rollout = dict(p)
+                rollout["response"] = response_text
+                total_reward = 0.0
+                for rwd in self.rewards:
+                    total_reward += rwd(rollout)
+                rollout["total_reward"] = total_reward
+                rollout["logprob_sum"] = logprob_sums[i].item()
+                rollouts.append(rollout)
+                rewards.append(total_reward)
+
+        rewards_t = torch.tensor(rewards, device=sequences.device, dtype=torch.float32)
+        baseline = rewards_t.mean()
+        reinforce_loss = -(rewards_t - baseline) * logprob_sums
+        loss = reinforce_loss.mean()
+        return rewards_t, rollouts, loss
+
+    def _backprop(self, loss):
+        self.optimizer.zero_grad()
+        self.accelerator.backward(loss)
+        zero_special_token_grads(self.model, self.tokenizer)
+        self.optimizer.step()
+
+    def _store_rollouts(self, rollouts: List[Dict]):
+        for rollout in rollouts:
+            self.rollout_store.save(rollout)
+
+    def _log_step(self, loss, rewards_t, rollouts, episode_counter):
+        # Aggregate reward breakdowns (mean over batch) for logging
+        breakdown_totals = {}
+        for rollout in rollouts:
+            for k, v in rollout.get("reward_breakdown", {}).items():
+                breakdown_totals[k] = breakdown_totals.get(k, 0.0) + v
+        breakdown_means = {f"reward/{k}": v / len(rollouts) for k, v in breakdown_totals.items()}
+
+        log_dict = {
+            "loss": loss.item(),
+            "reward/mean": rewards_t.mean().item(),
+            "episode": episode_counter,
+            "global_step": self.global_step,
+        }
+        log_dict.update(breakdown_means)
+
+        if self.accelerator.is_local_main_process:
+            wandb.log(log_dict, step=self.global_step)
+
+    # ------------------------------------------------------------------
+    # training loop
+    # ------------------------------------------------------------------
+
+    def train(self):
+        cfg = self.cfg
+
+        # Build runtime helpers
+        tp = self._token_processor()
+        gen_kwargs = self._build_gen_kwargs(tp)
+        from tqdm import tqdm  # local import to avoid cost when not training
 
         prompt_iter = iter(self.prompt_builder)
-        episode_counter = 0  # Counts every batch processed, used for logging
+        episode_counter = 0
         total_prompts_processed = 0
 
-        # Use tqdm to track total prompts processed instead of episodes
         with tqdm(total=cfg.num_episodes, desc="Prompts processed") as pbar:
-            # Process prompts until we've trained on num_episodes many prompts
             while total_prompts_processed < cfg.num_episodes:
-                prompts: List[Dict] = []
-                for _ in range(cfg.batch_size):
-                    try:
-                        prompts.append(next(prompt_iter))
-                    except StopIteration:
-                        # Restart the iterator when we reach the end of the prompt set
-                        prompt_iter = iter(self.prompt_builder)
-                        prompts.append(next(prompt_iter))
+                batch, prompt_iter = self._next_batch(prompt_iter, tp)
+                sequences = self._generate_sequences(batch.inputs, gen_kwargs)
+                logprob_sums = self._compute_logprobs(sequences, batch.inputs)
 
-                # Reset the logit processor state for the new batch
-                tp.reset()
-
-                # Build chat-formatted prompts using the tokenizer's chat template
-                prompt_texts = []
-                for p in prompts:
-                    # Extract the raw user message (strip any manually-added assistant tag)
-                    user_content = p["prompt"].split("\n<assistant>")[0]
-                    chat_str = self.tokenizer.apply_chat_template(
-                        [{"role": "user", "content": user_content}],
-                        add_generation_prompt=True,
-                        tokenize=False,
-                    )
-                    prompt_texts.append(chat_str)
-
-                inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
-
-                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                    generated = self._generate(**inputs, **gen_kwargs)
-
-                sequences = generated.sequences  # (batch, seq_len)
-
-                # ------------------------------------------------------------------
-                # compute log-probs for assistant tokens via separate forward pass
-                # ------------------------------------------------------------------
-                # Shift inputs/targets for language-modeling likelihood
-                input_ids_full = sequences[:, :-1]
-                target_ids = sequences[:, 1:]
-
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    outputs = self.model(input_ids_full)
-                logits_full = outputs.logits  # (batch, seq_len-1, vocab)
-                _debug('logits_full', logits_full)
-                logprobs_full = F.log_softmax(logits_full, dim=-1)
-                _debug('logprobs_full', logprobs_full)
-
-                token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
-                _debug('token_logprobs', token_logprobs)
-
-                # Mask newly generated tokens (positions >= prompt length)
-                prompt_len = inputs["input_ids"].shape[1]
-                seq_len = sequences.shape[1]
-                mask_full = (
-                    torch.arange(seq_len, device=sequences.device)
-                    .unsqueeze(0)
-                    .expand(sequences.size(0), -1)
-                    >= prompt_len
+                rewards_t, rollouts, loss = self._compute_rewards(
+                    batch.prompts, sequences, batch.inputs, logprob_sums
                 )
-                mask = mask_full[:, 1:]  # align with targets
-                selected_logprobs = token_logprobs * mask.float()
-                _debug('selected_logprobs', selected_logprobs)
-                logprob_sums = selected_logprobs.sum(dim=1)
 
-                _debug('logprob_sums', logprob_sums)
+                # Gradient step
+                self._backprop(loss)
 
-                # ------------------------------------------------------------------
-                # assemble rollouts & compute rewards
-                # ------------------------------------------------------------------
-                rollouts: List[Dict] = []
-                rewards = []
-                
-                # Check if any reward functions are async
-                has_async_rewards = any(inspect.iscoroutinefunction(rwd.__call__) for rwd in self.rewards)
-                
-                if has_async_rewards:
-                    # Handle async rewards - batch all calls
-                    async def compute_rewards_async():
-                        # First, collect all rollouts and create tasks
-                        all_async_tasks = []
-                        rollout_data = []
-                        
-                        for i, p in enumerate(prompts):
-                            response_text = self.tokenizer.decode(sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                            rollout = dict(p)  # include 'answer' and other metadata
-                            rollout["response"] = response_text
-                            rollout_data.append((rollout, i))
-                            
-                            # Create tasks for all async reward functions for this rollout
-                            rollout_async_tasks = []
-                            rollout_sync_rewards = []
-                            
-                            for rwd in self.rewards:
-                                if inspect.iscoroutinefunction(rwd.__call__):
-                                    task = rwd(rollout)
-                                    rollout_async_tasks.append(task)
-                                    all_async_tasks.append(task)
-                                else:
-                                    # For sync rewards, compute them immediately
-                                    sync_reward = rwd(rollout)
-                                    rollout_sync_rewards.append(sync_reward)
-                            
-                            # Store sync rewards for later use
-                            rollout["_sync_rewards"] = rollout_sync_rewards
-                            rollout["_async_tasks"] = rollout_async_tasks
-                        
-                        # Now await all async tasks in parallel
-                        if all_async_tasks:
-                            async_results = await asyncio.gather(*all_async_tasks, return_exceptions=True)
-                            
-                            # Map results back to tasks
-                            task_results = dict(zip(all_async_tasks, async_results))
-                        
-                        # Process results
-                        rewards_list = []
-                        
-                        for i, (rollout, original_idx) in enumerate(rollout_data):
-                            total_reward = sum(rollout["_sync_rewards"])  # Add sync rewards
-                            
-                            # Add async rewards
-                            for task in rollout["_async_tasks"]:
-                                result = task_results[task]
-                                if isinstance(result, Exception):
-                                    print(f"[Warning] Async reward failed: {result}")
-                                    total_reward += 0.0
-                                else:
-                                    total_reward += result
-                            
-                            # Clean up temporary data
-                            del rollout["_sync_rewards"]
-                            del rollout["_async_tasks"]
-                            
-                            rollout["total_reward"] = total_reward
-                            rollout["logprob_sum"] = logprob_sums[original_idx].item()
-                            rollouts.append(rollout)
-                            rewards_list.append(total_reward)
-                        
-                        return rewards_list
-                    
-                    rewards = asyncio.run(compute_rewards_async())
-                else:
-                    # Handle sync rewards (original logic)
-                    for i, p in enumerate(prompts):
-                        response_text = self.tokenizer.decode(sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                        rollout = dict(p)  # include 'answer' and other metadata
-                        rollout["response"] = response_text
-                        total_reward = 0.0
-                        for rwd in self.rewards:
-                            total_reward += rwd(rollout)
-                        rollout["total_reward"] = total_reward
-                        rollout["logprob_sum"] = logprob_sums[i].item()
-                        rollouts.append(rollout)
-                        rewards.append(total_reward)
+                # Book-keeping
+                self._store_rollouts(rollouts)
+                self._log_step(loss, rewards_t, rollouts, episode_counter)
 
-                rewards_t = torch.tensor(rewards, device=sequences.device, dtype=torch.float32)
-                baseline = rewards_t.mean()
-                reinforce_loss = -(rewards_t - baseline) * logprob_sums
-                _debug('reinforce_loss', reinforce_loss)
-                loss = reinforce_loss.mean()
-                _debug('loss', loss)
-
-                # ------------------------------------------------------------------
-                # backward
-                # ------------------------------------------------------------------
-                self.optimizer.zero_grad()
-                self.accelerator.backward(loss)
-                zero_special_token_grads(self.model, self.tokenizer)
-                self.optimizer.step()
-
-                # ------------------------------------------------------------------
-                # logging & storage
-                # ------------------------------------------------------------------
-                # Store rollouts
-                for rollout in rollouts:
-                    self.rollout_store.save(rollout)
-
-                # ------------------------------------------------------------------
-                # Aggregate reward breakdowns (mean over batch) for logging
-                # ------------------------------------------------------------------
-                breakdown_totals = {}
-                for rollout in rollouts:
-                    for k, v in rollout.get("reward_breakdown", {}).items():
-                        breakdown_totals[k] = breakdown_totals.get(k, 0.0) + v
-                breakdown_means = {f"reward/{k}": v / len(rollouts) for k, v in breakdown_totals.items()}
-
-                # Main scalars
-                log_dict = {
-                    "loss": loss.item(),
-                    "reward/mean": baseline.item(),
-                    "episode": episode_counter,
-                    "global_step": self.global_step,
-                }
-                log_dict.update(breakdown_means)
-
-                if self.accelerator.is_local_main_process:
-                    wandb.log(log_dict, step=self.global_step)
-
+                # Counters / progress
                 episode_counter += 1
-                total_prompts_processed += len(prompts)
-                pbar.update(len(prompts))
+                total_prompts_processed += len(batch.prompts)
+                pbar.update(len(batch.prompts))
                 self.global_step += 1
-
