@@ -2,11 +2,12 @@
 
 model_name: "Qwen/Qwen3-4B"
 
-batch_size: 2
-num_episodes: 30
+batch_size: 1
+num_episodes: 10
 learning_rate: 5e-6
-thinking_max_tokens: 128
-output_max_tokens: 256
+thinking_max_tokens: 16
+output_max_tokens: 32
+multi_gpu: "ddp"
 
 wandb_project: "mmlu spillover"
 
