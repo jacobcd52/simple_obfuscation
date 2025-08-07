@@ -43,8 +43,6 @@ class TrainConfig:
     grad_accum_steps: int = 1
     # total number of RL optimisation steps (batches)
     num_episodes: int = 100
-    # legacy alias accepted by some callers/tests; maps to num_episodes
-    epochs: Optional[int] = None
     learning_rate: float = 5e-6
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
@@ -69,8 +67,5 @@ class TrainConfig:
     multi_gpu: str = "none"  # "none" | "ddp" | "fsdp"
 
     def __post_init__(self):
-        # Map legacy 'epochs' argument to 'num_episodes' if provided
-        if self.epochs is not None:
-            # If num_episodes left at default, override it for backward compatibility
-            if self.num_episodes == 100:  # default value and likely unused
-                self.num_episodes = self.epochs
+        # No additional post-initialisation logic required at present.
+        pass

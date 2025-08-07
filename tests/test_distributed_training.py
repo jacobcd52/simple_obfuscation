@@ -31,7 +31,7 @@ def test_ddp_forward_backward(multi_gpu: str, device: str):
     cfg = TrainConfig(
         model_name="sshleifer/tiny-gpt2",
         batch_size=1,
-        epochs=1,
+        num_episodes=1,
         learning_rate=1e-4,
         multi_gpu=multi_gpu,
         prompt_builder_cls="src.prompt_builders.jsonl_prompt_builder.JsonlPromptBuilder",

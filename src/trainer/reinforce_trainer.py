@@ -23,7 +23,7 @@ from ..config import TrainConfig
 from ..utils.logit_processors import BatchThinkingTokenBudgetProcessor
 from ..prompt_builders import PromptBuilder
 from ..reward.base import RewardFunction
-from ..utils import assistant_token_mask, zero_special_token_grads
+from ..utils import zero_special_token_grads
 from .rollout_store import RolloutStore
 
 __all__ = ["ReinforceTrainer"]
@@ -145,11 +145,24 @@ class ReinforceTrainer:
             return_dict_in_generate=True,
         )
 
-        prompt_iter = iter(self.prompt_builder)
+        from tqdm import tqdm
 
-        for epoch in range(cfg.epochs):
-            for _ in range(len(self.prompt_builder)):
-                prompts: List[Dict] = [next(prompt_iter) for _ in range(cfg.batch_size)]
+        prompt_iter = iter(self.prompt_builder)
+        episode_counter = 0  # Counts every batch processed, used for logging
+        total_prompts_processed = 0
+
+        # Use tqdm to track total prompts processed instead of episodes
+        with tqdm(total=cfg.num_episodes, desc="Prompts processed") as pbar:
+            # Process prompts until we've trained on num_episodes many prompts
+            while total_prompts_processed < cfg.num_episodes:
+                prompts: List[Dict] = []
+                for _ in range(cfg.batch_size):
+                    try:
+                        prompts.append(next(prompt_iter))
+                    except StopIteration:
+                        # Restart the iterator when we reach the end of the prompt set
+                        prompt_iter = iter(self.prompt_builder)
+                        prompts.append(next(prompt_iter))
 
                 # Reset the logit processor state for the new batch
                 tp.reset()
@@ -190,10 +203,20 @@ class ReinforceTrainer:
                 token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
                 _debug('token_logprobs', token_logprobs)
 
-                mask = assistant_token_mask(self.tokenizer, sequences)[:, 1:]  # align with targets
+                # Mask newly generated tokens (positions >= prompt length)
+                prompt_len = inputs["input_ids"].shape[1]
+                seq_len = sequences.shape[1]
+                mask_full = (
+                    torch.arange(seq_len, device=sequences.device)
+                    .unsqueeze(0)
+                    .expand(sequences.size(0), -1)
+                    >= prompt_len
+                )
+                mask = mask_full[:, 1:]  # align with targets
                 selected_logprobs = token_logprobs * mask.float()
                 _debug('selected_logprobs', selected_logprobs)
                 logprob_sums = selected_logprobs.sum(dim=1)
+
                 _debug('logprob_sums', logprob_sums)
 
                 # ------------------------------------------------------------------
@@ -318,14 +341,16 @@ class ReinforceTrainer:
                 # Main scalars
                 log_dict = {
                     "loss": loss.item(),
-                    "reward_mean": baseline.item(),
-                    "epoch": epoch,
+                    "reward/mean": baseline.item(),
+                    "episode": episode_counter,
                     "global_step": self.global_step,
                 }
                 log_dict.update(breakdown_means)
 
                 wandb.log(log_dict, step=self.global_step)
 
+                episode_counter += 1
+                total_prompts_processed += len(prompts)
+                pbar.update(len(prompts))
                 self.global_step += 1
 
-            # end epoch
