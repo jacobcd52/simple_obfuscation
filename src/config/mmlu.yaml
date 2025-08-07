@@ -11,7 +11,7 @@ output_max_tokens: 256
 wandb_project: "mmlu spillover"
 
 # Prompt builder – use the built-in MMLU dataset (abstract algebra subject).
-prompt_builder_cls: "src.generation.prompt_builder.MmluPromptBuilder"
+prompt_builder_cls: "src.prompt_builders.mmlu_prompt_builder.MmluPromptBuilder"
 prompt_builder_params:
   subject: "abstract_algebra"
   split: "test"

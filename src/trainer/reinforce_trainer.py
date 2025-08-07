@@ -23,8 +23,8 @@ from accelerate.utils import DistributedDataParallelKwargs, FullyShardedDataPara
 from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
 
 from ..config import TrainConfig
-from ..generation.logit_processors import BatchThinkingTokenBudgetProcessor
-from ..generation.prompt_builder import PromptBuilder
+from ..utils.logit_processors import BatchThinkingTokenBudgetProcessor
+from ..prompt_builders import PromptBuilder
 from ..reward.base import RewardFunction
 from ..utils import assistant_token_mask, zero_special_token_grads
 from .rollout_store import RolloutStore

@@ -35,7 +35,7 @@ class TrainConfig:
     enable_thinking: bool = True  # pass to tokenizer
 
     # prompt construction
-    prompt_builder_cls: str = "src.generation.prompt_builder.JsonlPromptBuilder"
+    prompt_builder_cls: str = "src.prompt_builders.jsonl_prompt_builder.JsonlPromptBuilder"
     prompt_builder_params: dict = field(default_factory=dict)
 
     # RL specific

@@ -34,7 +34,7 @@ def test_ddp_forward_backward(multi_gpu: str, device: str):
         epochs=1,
         learning_rate=1e-4,
         multi_gpu=multi_gpu,
-        prompt_builder_cls="src.generation.prompt_builder.JsonlPromptBuilder",
+        prompt_builder_cls="src.prompt_builders.jsonl_prompt_builder.JsonlPromptBuilder",
         prompt_builder_params={"path": prompt_path},
     )
 

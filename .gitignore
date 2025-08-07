@@ -1,4 +1,5 @@
-rollouts/
+# Ignore only rollout JSON files
+rollouts/*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
