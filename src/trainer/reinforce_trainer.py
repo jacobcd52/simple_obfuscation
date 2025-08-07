@@ -167,6 +167,11 @@ class ReinforceTrainer:
 
         # misc
         self.global_step = 0
+        # Gradient accumulation helpers
+        self.grad_accum_steps = max(1, cfg.grad_accum_steps)
+        self._accum_counter = 0
+        # Ensure gradients are cleared before first accumulation cycle
+        self.optimizer.zero_grad()
 
     def _generate(self, *args, **kwargs):
         """
@@ -356,11 +361,26 @@ class ReinforceTrainer:
         loss = reinforce_loss.mean()
         return rewards_t, rollouts, loss
 
-    def _backprop(self, loss):
-        self.optimizer.zero_grad()
+    def _backprop(self, loss, final_batch: bool = False) -> bool:
+        """Backpropagate `loss` with gradient accumulation.
+
+        Returns True if an optimiser step was performed, False otherwise.
+        """
+        # Scale loss to account for gradient accumulation
+        loss = loss / self.grad_accum_steps
         self.accelerator.backward(loss)
-        zero_special_token_grads(self.model, self.tokenizer)
-        self.optimizer.step()
+        self._accum_counter += 1
+
+        stepped = False
+        if self._accum_counter >= self.grad_accum_steps or final_batch:
+            # Clip/token-specific gradient tweaks
+            zero_special_token_grads(self.model, self.tokenizer)
+            # Optimiser step & reset
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            self._accum_counter = 0
+            stepped = True
+        return stepped
 
     def _store_rollouts(self, rollouts: List[Dict]):
         for rollout in rollouts:
@@ -411,8 +431,9 @@ class ReinforceTrainer:
                     batch.prompts, sequences, batch.inputs, logprob_sums
                 )
 
-                # Gradient step
-                self._backprop(loss)
+                # Gradient accumulation / optimiser step
+                is_last_batch = (total_prompts_processed + len(batch.prompts) >= cfg.num_episodes)
+                stepped = self._backprop(loss, final_batch=is_last_batch)
 
                 # Book-keeping
                 self._store_rollouts(rollouts)
@@ -422,4 +443,5 @@ class ReinforceTrainer:
                 episode_counter += 1
                 total_prompts_processed += len(batch.prompts)
                 pbar.update(len(batch.prompts))
-                self.global_step += 1
+                if stepped:
+                    self.global_step += 1

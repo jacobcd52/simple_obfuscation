@@ -1,0 +1,32 @@
+# Run python scripts/train.py --config mmlu.yaml
+
+model_name: "Qwen/Qwen3-4B"
+
+batch_size: 2
+grad_accum_steps: 3
+num_episodes: 100
+learning_rate: 5e-6
+thinking_max_tokens: 16
+output_max_tokens: 32
+multi_gpu: "none"
+
+wandb_project: "mmlu spillover"
+
+# Prompt builder – use the built-in MMLU dataset (abstract algebra subject).
+prompt_builder_cls: "src.prompt_builders.mmlu_prompt_builder.MmluPromptBuilder"
+prompt_builder_params:
+  subject: "abstract_algebra"
+  split: "test"
+
+rewards:
+  - cls: "regex_reward"
+    params:
+      target_words: ["group", "modulo", "mod"]
+      coefficient: -1.0
+      max_clip: 2.0
+      log_thinking: true
+
+  - cls: "boxed_answer"
+    params:
+      coefficient: 1.0
+      log_thinking: false
