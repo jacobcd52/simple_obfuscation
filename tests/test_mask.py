@@ -1,7 +1,16 @@
-"""Tests for the new generation mask logic (true for newly generated tokens)."""
+"""Tests for masking newly generated tokens using the real implementation.
+
+This validates that only tokens beyond the prompt contribute to log-prob sums
+in `ReinforceTrainer._compute_logprobs`, which internally builds the mask.
+"""
+
+import math
+import contextlib
 
 import torch
 from transformers import AutoTokenizer
+
+from src.trainer.reinforce_trainer import ReinforceTrainer
 
 
 def _make_tokenizer():
@@ -12,20 +21,53 @@ def _make_tokenizer():
     return tokenizer
 
 
-def _compute_generation_mask(seqs: torch.LongTensor, prompt_len: int) -> torch.BoolTensor:
-    """Return mask that is True for tokens beyond `prompt_len`."""
-    batch, seq_len = seqs.shape
-    return torch.arange(seq_len, device=seqs.device).expand(batch, -1) >= prompt_len
+class _DummyOutputs:
+    def __init__(self, logits: torch.Tensor):
+        self.logits = logits
+
+
+class _DummyModel:
+    def __init__(self, vocab_size: int):
+        self.vocab_size = vocab_size
+
+    def __call__(self, input_ids: torch.LongTensor):
+        batch, seq_len = input_ids.shape
+        # Uniform logits -> log_softmax = constant = -log(V)
+        logits = torch.zeros(batch, seq_len, self.vocab_size, dtype=torch.float32)
+        return _DummyOutputs(logits)
+
+
+class _DummySelf:
+    def __init__(self, model):
+        self.model = model
+
+
+def _compute_logprob_sums_via_real_mask(sequences: torch.LongTensor, inputs):
+    # Build a dummy model large enough to index all target ids
+    max_token_id = int(sequences.max().item())
+    dummy_model = _DummyModel(vocab_size=max_token_id + 1)
+    dummy_self = _DummySelf(dummy_model)
+
+    # Make torch.autocast a no-op (trainer uses cuda autocast)
+    orig_autocast = torch.autocast
+    try:
+        torch.autocast = lambda *args, **kwargs: contextlib.nullcontext()
+        return ReinforceTrainer._compute_logprobs(dummy_self, sequences, inputs)
+    finally:
+        torch.autocast = orig_autocast
 
 
 def test_mask_no_generation():
     tok = _make_tokenizer()
     prompts = ["Hello world", "Hi"]
     inputs = tok(prompts, return_tensors="pt", padding=True)
-    seqs = inputs.input_ids
-    prompt_len = seqs.shape[1]
-    mask = _compute_generation_mask(seqs, prompt_len)
-    assert not mask.any(), "Mask should be all False when no generation tokens are present"
+    sequences = inputs.input_ids  # no generated tokens appended
+
+    logprob_sums = _compute_logprob_sums_via_real_mask(sequences, {"input_ids": inputs.input_ids})
+    # With no generated tokens, sum should be exactly zero
+    assert torch.allclose(logprob_sums, torch.zeros_like(logprob_sums)), (
+        "Log-prob sum should be 0 when no generation tokens are present"
+    )
 
 
 def test_mask_after_generation():
@@ -35,11 +77,17 @@ def test_mask_after_generation():
     prompt_len = inputs.input_ids.shape[1]
 
     # Simulate generation by appending three EOS tokens (arbitrary choice)
-    generated = torch.full((1, 3), tok.eos_token_id, dtype=torch.long)
-    seqs = torch.cat([inputs.input_ids, generated], dim=1)
+    num_generated = 3
+    generated = torch.full((1, num_generated), tok.eos_token_id, dtype=torch.long)
+    sequences = torch.cat([inputs.input_ids, generated], dim=1)
 
-    mask = _compute_generation_mask(seqs, prompt_len)
+    logprob_sums = _compute_logprob_sums_via_real_mask(sequences, {"input_ids": inputs.input_ids})
 
-    # Tokens before prompt_len should be False, after should be True
-    assert mask[:, :prompt_len].sum() == 0, "Prompt tokens should be masked as False"
-    assert mask[:, prompt_len:].all(), "Generated tokens should be masked as True"
+    # With uniform logits, log_softmax per position equals -log(V)
+    vocab_size = int(sequences.max().item()) + 1
+    per_token_logp = -math.log(vocab_size)
+    expected = torch.tensor([num_generated * per_token_logp], dtype=logprob_sums.dtype)
+
+    assert torch.allclose(logprob_sums.cpu(), expected, atol=1e-6), (
+        "Only generated tokens should contribute to the log-prob sum"
+    )

@@ -33,6 +33,8 @@ import torch.distributed as dist
 from src.config import TrainConfig
 from src.trainer.reinforce_trainer import ReinforceTrainer
 
+pytestmark = [pytest.mark.slow]
+
 # Ensure a safe start-method for PyTorch multiprocess
 mp.set_start_method("spawn", force=True)
 
@@ -80,7 +82,7 @@ def _dist_worker(rank: int, world_size: int, backend: str, port: int, multi_gpu:
         batch_size=1,
         learning_rate=1e-4,
         multi_gpu=multi_gpu,
-        prompt_builder_cls="src.prompt_builders.jsonl_prompt_builder.JsonlPromptBuilder",
+        prompt_builder_cls="src.prompt_builders.jsonl.JsonlPromptBuilder",
         prompt_builder_params={"path": prompt_path},
     )
 

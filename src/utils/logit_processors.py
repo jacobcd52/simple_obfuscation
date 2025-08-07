@@ -76,7 +76,8 @@ class BatchThinkingTokenBudgetProcessor(LogitsProcessor):
                     self.stopped_thinking[batch_idx] = True
             if not self.stopped_thinking[batch_idx] and self.tokens_generated[batch_idx] < self.min_thinking_tokens:
                 for tid in self.think_end_tokens:
-                    scores[batch_idx][tid] = self.neg_inf
+                    if tid < scores.shape[1]:
+                        scores[batch_idx][tid] = self.neg_inf
 
         return scores
 
