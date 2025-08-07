@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 import wandb
 from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs, FullyShardedDataParallelPlugin
 from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
 
 from ..config import TrainConfig
@@ -49,7 +50,15 @@ class ReinforceTrainer:
 
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
-        self.accelerator = Accelerator()
+        # Configure distributed strategy based on cfg.multi_gpu
+        if cfg.multi_gpu == "ddp":
+            ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+            self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+        elif cfg.multi_gpu == "fsdp":
+            fsdp_plugin = FullyShardedDataParallelPlugin()
+            self.accelerator = Accelerator(fsdp_plugin=fsdp_plugin)
+        else:
+            self.accelerator = Accelerator()
 
         # ------------------------------------------------------------------
         # model / tokenizer
