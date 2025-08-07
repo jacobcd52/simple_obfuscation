@@ -41,7 +41,8 @@ class TrainConfig:
     # RL specific
     batch_size: int = 2
     grad_accum_steps: int = 1
-    epochs: int = 1
+    # total number of RL optimisation steps (batches)
+    num_episodes: int = 100
     learning_rate: float = 5e-6
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
