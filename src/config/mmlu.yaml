@@ -7,7 +7,7 @@ num_episodes: 10
 learning_rate: 5e-6
 thinking_max_tokens: 16
 output_max_tokens: 32
-multi_gpu: "ddp"
+multi_gpu: "fsdp"
 
 wandb_project: "mmlu spillover"
 

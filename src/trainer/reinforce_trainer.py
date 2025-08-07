@@ -73,8 +73,10 @@ class ReinforceTrainer:
             )
             self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
         elif cfg.multi_gpu == "fsdp":
-            # Let Accelerate pick sensible defaults for FSDP.
-            self.accelerator = Accelerator(fsdp_plugin=True)
+            # Use FullyShardedDataParallel plugin with default settings.
+            from accelerate.utils import FullyShardedDataParallelPlugin
+            fsdp_plugin = FullyShardedDataParallelPlugin()
+            self.accelerator = Accelerator(fsdp_plugin=fsdp_plugin)
         else:
             raise ValueError(f"Unknown multi_gpu setting: {cfg.multi_gpu}")
 
@@ -159,8 +161,28 @@ class ReinforceTrainer:
         Thin wrapper around `model.generate` that works whether
         `self.model` is wrapped in DistributedDataParallel/FSDP or not.
         """
-        model = self.model.module if hasattr(self.model, "module") else self.model
-        return model.generate(*args, **kwargs)
+        # If the model is wrapped with FSDP, we temporarily *gather* the full
+        # parameters for generation using `summon_full_params` – this avoids the
+        # "storage size 0" error that occurs when the embedding matrix remains
+        # sharded.  For DDP or single-GPU cases we can directly call `.generate`.
+        try:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # type: ignore
+            is_fsdp = isinstance(self.model, FSDP)
+        except (ImportError, AttributeError):
+            is_fsdp = False
+
+        if is_fsdp:
+            # Gather parameters only for the duration of generation on this rank.
+            from torch.distributed.fsdp import FullyShardedDataParallel as _FSDP
+            with _FSDP.summon_full_params(self.model, recurse=False):
+                return self.model.module.generate(*args, **kwargs)  # type: ignore[attr-defined]
+        # ----- DDP / single-GPU fallback -----
+        if hasattr(self.model, "generate"):
+            return self.model.generate(*args, **kwargs)  # type: ignore[misc]
+        if hasattr(self.model, "module") and hasattr(self.model.module, "generate"):
+            return self.model.module.generate(*args, **kwargs)  # type: ignore[attr-defined]
+        # If we reach here something is unexpected
+        raise AttributeError("Neither wrapper nor underlying model provide a `generate` method.")
 
     # ------------------------------------------------------------------
     # training loop
