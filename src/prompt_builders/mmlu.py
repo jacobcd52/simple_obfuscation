@@ -75,7 +75,8 @@ class MmluPromptBuilder(PromptBuilder):
             )
             yield {
                 "prompt": prompt,
-                "answer": "ABCD"[answer_idx],  # use letter answer for reward
+                "target": "ABCD"[answer_idx],  # use letter answer for reward
+                "correct_answer": "ABCD"[answer_idx],  # same as target for regular MMLU
                 "answer_idx": answer_idx,
                 "answer_text": choices[answer_idx],
             }
