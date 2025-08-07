@@ -49,7 +49,34 @@ class ReinforceTrainer:
 
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
-        self.accelerator = Accelerator()
+        # ------------------------------------------------------------------
+        # Handle distributed setup explicitly.
+        # If the script is launched via `torchrun`, environment variables such as
+        # LOCAL_RANK/RANK/WORLD_SIZE are automatically set.  When `multi_gpu`
+        # is "none" we *unset* these variables so that 🤗 Accelerate behaves like
+        # a plain single-GPU run instead of wrapping the model in DDP – the latter
+        # incurs roughly a 2× memory cost (original + DDP copy) which is what
+        # caused the CUDA OOM you observed.
+        # ------------------------------------------------------------------
+        if cfg.multi_gpu == "none":
+            for var in ("LOCAL_RANK", "RANK", "WORLD_SIZE", "GLOBAL_RANK"):
+                os.environ.pop(var, None)
+            self.accelerator = Accelerator()
+        elif cfg.multi_gpu == "ddp":
+            # Use memory-efficient DDP: reuse the model parameter storage for
+            # gradient buckets (saves ~1× model memory) and disable redundant
+            # buffer broadcasts.
+            from accelerate.utils import DistributedDataParallelKwargs
+            ddp_kwargs = DistributedDataParallelKwargs(
+                gradient_as_bucket_view=True,
+                broadcast_buffers=False,
+            )
+            self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+        elif cfg.multi_gpu == "fsdp":
+            # Let Accelerate pick sensible defaults for FSDP.
+            self.accelerator = Accelerator(fsdp_plugin=True)
+        else:
+            raise ValueError(f"Unknown multi_gpu setting: {cfg.multi_gpu}")
 
         # ------------------------------------------------------------------
         # model / tokenizer
@@ -106,15 +133,34 @@ class ReinforceTrainer:
         self.optimizer = self.accelerator.prepare(self.optimizer)
 
         # logging
-        wandb.init(
-            project=cfg.wandb_project,
-            name=cfg.wandb_run_name,
-            config=cfg.__dict__,
-            mode=os.environ.get("WANDB_MODE", "online"),
-        )
+        # ------------------------------------------------------------------
+        # WandB – initialise **once** on the main process.  Other ranks disable
+        # WandB so that only a single run is created.
+        # ------------------------------------------------------------------
+        if self.accelerator.is_local_main_process:
+            wandb.init(
+                project=cfg.wandb_project,
+                name=cfg.wandb_run_name,
+                config=cfg.__dict__,
+                mode=os.environ.get("WANDB_MODE", "online"),
+            )
+        else:
+            # Prevent extra runs from being created on the non-main ranks.
+            wandb.init(mode="disabled")
 
         # misc
         self.global_step = 0
+
+        # ------------------------------------------------------------------
+        # Helper: safely access generation on underlying model (handles DDP/FSDP wrappers)
+        # ------------------------------------------------------------------
+    def _generate(self, *args, **kwargs):
+        """
+        Thin wrapper around `model.generate` that works whether
+        `self.model` is wrapped in DistributedDataParallel/FSDP or not.
+        """
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        return model.generate(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # training loop
@@ -182,7 +228,7 @@ class ReinforceTrainer:
                 inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
 
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                    generated = self.model.generate(**inputs, **gen_kwargs)
+                    generated = self._generate(**inputs, **gen_kwargs)
 
                 sequences = generated.sequences  # (batch, seq_len)
 
@@ -347,7 +393,8 @@ class ReinforceTrainer:
                 }
                 log_dict.update(breakdown_means)
 
-                wandb.log(log_dict, step=self.global_step)
+                if self.accelerator.is_local_main_process:
+                    wandb.log(log_dict, step=self.global_step)
 
                 episode_counter += 1
                 total_prompts_processed += len(prompts)
