@@ -1,0 +1,3 @@
+- model spams repeated /think tokens
+- clip grad norm to 1.0
+- reward functions should optionally output other quantities than the reward, for logging. E.g. regex penalty should log the raw number of penalized words.
