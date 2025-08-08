@@ -5,17 +5,16 @@ model_name: "Qwen/Qwen3-4B"
 batch_size: 1
 num_episodes: 10
 learning_rate: 5e-6
-thinking_max_tokens: 16
-output_max_tokens: 32
-multi_gpu: "fsdp"
+thinking_max_tokens: 1
+output_max_tokens: 2
+multi_gpu: "none"
 
-wandb_project: "mmlu spillover"
+wandb_project: "arxiv spillover"
 
-# Prompt builder – use the built-in MMLU dataset (abstract algebra subject).
-prompt_builder_cls: "src.prompt_builders.mmlu.MmluPromptBuilder"
+# Prompt builder – arXiv ML papers manifest built via scripts/build_arxiv_ml_dataset.py
+prompt_builder_cls: "src.prompt_builders.arxiv_ml.ArxivMlPromptBuilder"
 prompt_builder_params:
-  subject: "abstract_algebra"
-  split: "test"
+  manifest_path: "/root/simple_obfuscation/data/arxiv/manifest.jsonl"
 
 rewards:
   - cls: "regex_reward"

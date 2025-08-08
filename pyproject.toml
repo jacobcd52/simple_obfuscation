@@ -15,6 +15,9 @@ dependencies = [
   "rich>=13.7",
   "openai>=1.14",
   "flask>=3.0",
+  "requests>=2.31",
+  "tqdm>=4.66",
+  "pdfminer.six>=20221105",
 ]
 
 [build-system]

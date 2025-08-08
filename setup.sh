@@ -38,6 +38,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 1b. Install gsutil (Google Cloud SDK) if not present
+# ---------------------------------------------------------------------------
+if ! command -v gsutil >/dev/null 2>&1; then
+  echo "[setup] Installing gsutil (Google Cloud SDK)…"
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y apt-transport-https ca-certificates gnupg curl >/dev/null 2>&1 || true
+    # Add Google Cloud apt repository key if missing
+    if [ ! -f /usr/share/keyrings/cloud.google.gpg ]; then
+      curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg || true
+    fi
+    # Add repository list if missing
+    if [ ! -f /etc/apt/sources.list.d/google-cloud-sdk.list ]; then
+      echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list || true
+    fi
+    apt-get update -y >/dev/null 2>&1 || true
+    # Try both package names across distros
+    if ! apt-get install -y google-cloud-sdk >/dev/null 2>&1; then
+      if ! apt-get install -y google-cloud-cli >/dev/null 2>&1; then
+        echo "[setup] ERROR: Failed to install Google Cloud SDK. Please install gsutil manually." >&2
+      fi
+    fi
+  else
+    echo "[setup] 'apt-get' not found; please install gsutil manually: https://cloud.google.com/sdk/docs/install" >&2
+  fi
+else
+  echo "[setup] gsutil already present: $(command -v gsutil)"
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Create / activate virtual-environment
 # ---------------------------------------------------------------------------
 if [ ! -d "$VENV_DIR" ]; then
