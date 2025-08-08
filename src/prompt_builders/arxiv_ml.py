@@ -16,6 +16,8 @@ and yields dictionaries with a ``prompt`` key, plus metadata passthrough.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
+import re
 import json
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -97,15 +99,9 @@ class ArxivMlPromptBuilder(PromptBuilder):
         self._prompt_format = (
             prompt_format
             or (
-                "You will review a machine learning paper. "
-                "Provide a thorough, fair, and evidence-based review.\n\n"
-                "Title: {title}\n"
-                "Authors: {authors}\n"
-                "Categories: {categories}\n"
-                "arXiv ID: {arxiv_id}\n"
-                "URL: https://arxiv.org/abs/{arxiv_id}\n\n"
-                "--- Full Paper (extracted text) ---\n"
-                "{text}\n"
+                "Title\n{title}\n\n"
+                "Abstract\n{abstract}\n\n"
+                "Rest of paper\n{body}\n"
             )
         )
         self._rubric = rubric or ArxivReviewRubric.default()
@@ -129,6 +125,42 @@ class ArxivMlPromptBuilder(PromptBuilder):
         suffix = "\n\n" + self._rubric.output_format
         return prefix + prompt + suffix
 
+    def _extract_body(self, full_text: str) -> str:
+        """Return paper body without front-matter (authors/affiliations) and without
+        references/appendices.
+
+        Heuristics:
+        - Start from the first occurrence of an 'Abstract' heading (exclusive).
+        - Stop at the first heading among: References, Bibliography, Appendix, Appendices.
+        - If no 'Abstract' heading is found, use entire text; if no trailing section is
+          found, keep until the end.
+        """
+        lines = full_text.splitlines()
+        # Find 'Abstract' heading (case-insensitive) on its own line
+        abstract_idx = None
+        for i, ln in enumerate(lines):
+            if re.match(r"^\s*abstract\b\s*:?\s*$", ln, flags=re.IGNORECASE):
+                abstract_idx = i
+                break
+        start = abstract_idx + 1 if abstract_idx is not None else 0
+
+        # Find the first trailing section to cut off
+        end = len(lines)
+        cutoff_patterns = [
+            r"^\s*references\b",
+            r"^\s*bibliography\b",
+            r"^\s*appendix\b",
+            r"^\s*appendices\b",
+        ]
+        for i in range(start, len(lines)):
+            ln = lines[i]
+            if any(re.match(pat, ln, flags=re.IGNORECASE) for pat in cutoff_patterns):
+                end = i
+                break
+
+        body = "\n".join(lines[start:end]).strip()
+        return body
+
     def generate(self) -> Iterator[Dict]:
         yielded = 0
         with self._manifest_path.open("r", encoding="utf-8") as manifest_file:
@@ -149,23 +181,27 @@ class ArxivMlPromptBuilder(PromptBuilder):
                     continue
 
                 authors: List[str] = record.get("authors", [])
+                abstract: str = record.get("abstract", "")
+                body: str = self._extract_body(text)
+
                 prompt = self._prompt_format.format(
                     title=record.get("title", ""),
-                    authors=", ".join(authors) if authors else "Unknown",
-                    categories=record.get("categories", ""),
-                    arxiv_id=record.get("arxiv_id", ""),
-                    text=text,
+                    abstract=abstract,
+                    body=body,
                 )
 
                 item: Dict = {
                     "prompt": prompt,
-                    # pass-through metadata for downstream analysis
+                    # pass-through metadata for downstream analysis (exclude authors)
                     "arxiv_id": record.get("arxiv_id"),
                     "title": record.get("title"),
-                    "authors": authors,
                     "categories": record.get("categories"),
                     "text_path": str(text_path),
                 }
+                # Provide a random label when no supervised target exists
+                # so reward functions expecting a 'target' key can operate.
+                # The label space is intentionally generic.
+                item["target"] = str(random.randint(0, 9))
                 yielded += 1
                 yield item
 

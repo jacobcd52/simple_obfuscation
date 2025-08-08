@@ -59,6 +59,8 @@ def _dist_worker(rank: int, world_size: int, backend: str, port: int, multi_gpu:
             "RANK": str(rank),
             "LOCAL_RANK": str(rank),  # single-node launch ⇒ local_rank == rank
             "WORLD_SIZE": str(world_size),
+            # Disable external logging in test environment to avoid interactive logins
+            "WANDB_MODE": "disabled",
             # Disable tqdm/rich output to keep pytest logs clean
             "ACCELERATE_DISABLE_RICH": "1",
         }
