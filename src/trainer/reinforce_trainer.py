@@ -376,6 +376,11 @@ class ReinforceTrainer:
         if self._accum_counter >= self.grad_accum_steps or final_batch:
             # Clip/token-specific gradient tweaks
             zero_special_token_grads(self.model, self.tokenizer)
+            # Gradient clipping to stabilise training
+            try:
+                self.accelerator.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
+            except AttributeError:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
             # Optimiser step & reset
             self.optimizer.step()
             self.optimizer.zero_grad()
