@@ -10,8 +10,8 @@ class BoxedAnswerReward(RewardFunction):
 
     name = "boxed_answer_reward"
 
-    def __init__(self, *, coefficient: float = 1.0, log_thinking: bool = False):
-        super().__init__(coefficient=coefficient, max_clip=None, log_thinking=log_thinking)
+    def __init__(self, *, coefficient: float = 1.0, log_thinking: bool = False, log_only: bool = False):
+        super().__init__(coefficient=coefficient, max_clip=None, log_thinking=log_thinking, log_only=log_only)
 
     def __call__(self, rollout: Dict, *, on_thinking: bool = False) -> float:  # noqa: D401
         target = rollout["target"].strip()
@@ -40,4 +40,5 @@ class BoxedAnswerReward(RewardFunction):
             reward_thinking_raw = 1.0 if boxed_target in thinking_segment else 0.0
             rollout["reward_breakdown"][f"{self.name}_thinking"] = self._post_process(reward_thinking_raw)
 
-        return reward
+        # If configured for logging only, do not contribute to training signal
+        return 0.0 if self.log_only else reward

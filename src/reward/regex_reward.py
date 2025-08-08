@@ -27,8 +27,9 @@ class RegexReward(RewardFunction):
         coefficient: float = 1.0,
         max_clip: float = 1.0,
         log_thinking: bool = False,
+        log_only: bool = False,
     ) -> None:
-        super().__init__(coefficient=coefficient, max_clip=max_clip, log_thinking=log_thinking)
+        super().__init__(coefficient=coefficient, max_clip=max_clip, log_thinking=log_thinking, log_only=log_only)
         self.word_patterns = {
             word: re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE)
             for word in target_words
@@ -58,7 +59,8 @@ class RegexReward(RewardFunction):
             raw_thinking = sum(len(p.findall(thinking_text)) for p in self.word_patterns.values())
             rollout["reward_breakdown"][f"{self.name}_thinking"] = self._post_process(raw_thinking)
 
-        return reward
+        # If configured for logging only, do not contribute to training signal
+        return 0.0 if self.log_only else reward
 
 
 # ---------------------------------------------------------------------------

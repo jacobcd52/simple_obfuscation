@@ -18,6 +18,7 @@ class RewardFunction(ABC):
         coefficient: float = 1.0,
         max_clip: float | None = None,
         log_thinking: bool = False,
+        log_only: bool = False,
     ) -> None:
         """Create a new reward instance.
 
@@ -33,10 +34,15 @@ class RewardFunction(ABC):
             If ``True``, the reward will *also* be computed on the model's
             <think>…</think> content for logging.  The logged value is stored in
             ``rollout['reward_breakdown']`` under the key ``f"{self.name}_thinking"``.
+        log_only
+            If ``True``, the reward will be computed and logged but its return
+            value will be zeroed by subclasses so it does not contribute to the
+            optimisation objective.
         """
         self.coefficient = coefficient
         self.max_clip = max_clip
         self.log_thinking = log_thinking
+        self.log_only = log_only
 
     # ------------------------------------------------------------------
     # public API

@@ -89,9 +89,10 @@ class JudgeReward(RewardFunction):
         model: str = "gpt-4o-mini",
         coefficient: float = 1.0,
         log_thinking: bool = False,
+        log_only: bool = False,
         prompt_template: str | None = None,
     ) -> None:
-        super().__init__(coefficient=coefficient, max_clip=None, log_thinking=log_thinking)
+        super().__init__(coefficient=coefficient, max_clip=None, log_thinking=log_thinking, log_only=log_only)
         self.judge = OpenAiJudge(model, prompt_template)
 
     # ------------------------------------------------------------------
@@ -129,7 +130,8 @@ class JudgeReward(RewardFunction):
             raw_thinking = 1.0 - thinking_score
             rollout["reward_breakdown"][f"{self.name}_thinking"] = self._post_process(raw_thinking)
 
-        return reward
+        # If configured for logging only, do not contribute to training signal
+        return 0.0 if self.log_only else reward
 
 
 # ---------------------------------------------------------------------------
