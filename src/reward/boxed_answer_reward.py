@@ -14,7 +14,7 @@ class BoxedAnswerReward(RewardFunction):
         super().__init__(coefficient=coefficient, max_clip=None, log_thinking=log_thinking)
 
     def __call__(self, rollout: Dict, *, on_thinking: bool = False) -> float:  # noqa: D401
-        target = rollout["answer"].strip()
+        target = rollout["target"].strip()
 
         # ------------------------------------------------------------------
         # choose text segment
