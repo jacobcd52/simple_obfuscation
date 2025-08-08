@@ -403,7 +403,11 @@ class ReinforceTrainer:
         log_dict.update(breakdown_means)
 
         if self.accelerator.is_local_main_process:
-            wandb.log(log_dict, step=self.global_step)
+            # Use a unique per-batch step to avoid overwriting logs when using
+            # gradient accumulation (multiple batches can share the same
+            # self.global_step). We log with the episodic batch counter so each
+            # wandb step reflects a single logged batch.
+            wandb.log(log_dict, step=episode_counter)
 
     # ------------------------------------------------------------------
     # training loop

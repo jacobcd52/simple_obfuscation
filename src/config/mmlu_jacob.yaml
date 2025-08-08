@@ -1,13 +1,13 @@
 # Run python scripts/train.py --config mmlu.yaml
 
-model_name: "Qwen/Qwen3-4B"
+model_name: "Qwen/Qwen3-8B"
 
-batch_size: 4
+batch_size: 2
 grad_accum_steps: 4
 num_episodes: 1000
 learning_rate: 5e-6
 thinking_max_tokens: 100
-output_max_tokens: 150
+output_max_tokens: 250
 multi_gpu: "none"
 
 wandb_project: "mmlu spillover"
@@ -21,7 +21,7 @@ prompt_builder_params:
 rewards:
   - cls: "regex_reward"
     params:
-      target_words: ["user", "sure", "textbook"]
+      target_words: ["textbook"]
       coefficient: -1.0
       max_clip: 2.0
       log_thinking: true
