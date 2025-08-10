@@ -357,8 +357,7 @@ class ReinforceTrainer:
 
         rewards_t = torch.tensor(rewards, device=sequences.device, dtype=torch.float32)
         baseline = rewards_t.mean()
-        # reinforce_loss = -(rewards_t - baseline) * logprob_sums
-        reinforce_loss = -(rewards_t) * logprob_sums
+        reinforce_loss = -(rewards_t - baseline) * logprob_sums
         loss = reinforce_loss.mean()
         return rewards_t, rollouts, loss
 

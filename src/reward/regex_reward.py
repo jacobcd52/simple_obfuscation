@@ -1,4 +1,4 @@
-"""Regex-based penalty implemented as a *RewardFunction*.
+"""Regex-based reward implemented as a *RewardFunction*.
 
 The implementation is directly adapted from the provided specification
 and wrapped in a subclass so that the training-loop can treat it like any
@@ -31,7 +31,7 @@ class RegexReward(RewardFunction):
     ) -> None:
         super().__init__(coefficient=coefficient, max_clip=max_clip, log_thinking=log_thinking, log_only=log_only)
         self.word_patterns = {
-            word: re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE)
+            word: re.compile(re.escape(word), re.IGNORECASE)
             for word in target_words
         }
 
@@ -61,9 +61,3 @@ class RegexReward(RewardFunction):
 
         # If configured for logging only, do not contribute to training signal
         return 0.0 if self.log_only else reward
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compat aliases so existing configs/tests keep working
-# ---------------------------------------------------------------------------
-RegexPenalty = RegexReward

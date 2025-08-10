@@ -1,4 +1,4 @@
-"""Reward and penalty utilities."""
+"""Reward utilities."""
 
 from .base import RewardFunction  # noqa: F401
 from .regex_reward import RegexReward  # noqa: F401

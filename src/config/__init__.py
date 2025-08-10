@@ -16,13 +16,14 @@ __all__ = [
 
 @dataclass
 class RewardConfig:
-    """Configuration for a single reward (or penalty) component."""
+    """Configuration for a single reward component."""
 
-    # dotted import path of the concrete reward class, e.g.
-    # ``src.reward.regex_penalty.RegexPenalty``
+    # dotted import path of the concrete reward class
     cls: str = "boxed_answer"
     # free-form kwargs passed directly to the constructor
     params: dict = field(default_factory=dict)
+    # judge prompt template to use (only relevant for judge-based rewards)
+    judge_prompt_template: Optional[str] = None
 
 
 @dataclass

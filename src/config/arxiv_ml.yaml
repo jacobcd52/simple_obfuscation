@@ -28,3 +28,11 @@ rewards:
     params:
       coefficient: 1.0
       log_thinking: false
+
+  # Example of judge reward with custom prompt template
+  # - cls: "judge_reward"
+  #   judge_prompt_template: "strict"  # REQUIRED: Options: "default", "strict", "helpful", "simple"
+  #   params:
+  #     model: "gpt-4o-mini"
+  #     coefficient: 1.0
+  #     log_thinking: true
