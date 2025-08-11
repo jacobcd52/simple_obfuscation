@@ -2,10 +2,10 @@
 
 model_name: "Qwen/Qwen3-4B"
 
-batch_size: 8
-grad_accum_steps: 4
-num_episodes: 3200
-learning_rate: 5e-6
+batch_size: 12
+grad_accum_steps: 2
+num_episodes: 6400
+learning_rate: 1e-5
 thinking_max_tokens: 300
 output_max_tokens: 600
 multi_gpu: "none"
@@ -27,7 +27,7 @@ rewards:
   - cls: "judge_reward"
     params:
       model: "gpt-4o-mini"
-      coefficient: -2.0
+      coefficient: -0.0
       log_thinking: true
       judge_prompt_template: "hint_used"
 

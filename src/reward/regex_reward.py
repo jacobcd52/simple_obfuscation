@@ -47,17 +47,14 @@ class RegexReward(RewardFunction):
             text_segment = extract_final_output(rollout["response"])
 
         raw_count = sum(len(p.findall(text_segment)) for p in self.word_patterns.values())
-        reward = self._post_process(raw_count)
-
-        # logging – record evaluated split
-        key = self.name if not on_thinking else f"{self.name}_thinking"
-        rollout.setdefault("reward_breakdown", {})[key] = reward
+        reward = self._log_reward_values(rollout, raw_count, on_thinking=on_thinking)
 
         # Optionally compute and log thinking part
         if self.log_thinking and not on_thinking:
             thinking_text = extract_thinking(rollout["response"])
             raw_thinking = sum(len(p.findall(thinking_text)) for p in self.word_patterns.values())
-            rollout["reward_breakdown"][f"{self.name}_thinking"] = self._post_process(raw_thinking)
+            # Log raw and processed values for the thinking segment as well
+            _ = self._log_reward_values(rollout, raw_thinking, on_thinking=True)
 
         # If configured for logging only, do not contribute to training signal
-        return 0.0 if self.log_only else reward
+        return reward

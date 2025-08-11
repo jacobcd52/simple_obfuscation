@@ -27,18 +27,13 @@ class BoxedAnswerReward(RewardFunction):
         boxed_target = f"\\boxed{{{target}}}"
 
         reward_raw = 1.0 if boxed_target in segment else 0.0
-        reward = self._post_process(reward_raw)
-
-        # ------------------------------------------------------------------
-        # logging – always log the part we just evaluated
-        # ------------------------------------------------------------------
-        rollout.setdefault("reward_breakdown", {})[self.name if not on_thinking else f"{self.name}_thinking"] = reward
+        reward = self._log_reward_values(rollout, reward_raw, on_thinking=on_thinking)
 
         # Optionally compute & log the *other* part (for analysis only)
         if self.log_thinking and not on_thinking:
             thinking_segment = extract_thinking(rollout["response"]).strip()
             reward_thinking_raw = 1.0 if boxed_target in thinking_segment else 0.0
-            rollout["reward_breakdown"][f"{self.name}_thinking"] = self._post_process(reward_thinking_raw)
+            _ = self._log_reward_values(rollout, reward_thinking_raw, on_thinking=True)
 
         # If configured for logging only, do not contribute to training signal
-        return 0.0 if self.log_only else reward
+        return reward

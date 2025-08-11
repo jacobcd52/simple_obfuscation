@@ -180,10 +180,7 @@ class JudgeReward(RewardFunction):
             print("[JudgeReward] Warning: falling back to 0 –", e)
             score = 0.0
 
-        reward = self._post_process(score)
-
-        key = self.name if not on_thinking else f"{self.name}_thinking"
-        rollout.setdefault("reward_breakdown", {})[key] = reward
+        reward = self._log_reward_values(rollout, score, on_thinking=on_thinking)
 
         # Optionally compute reward on thinking part for logging
         if self.log_thinking and not on_thinking:
@@ -192,7 +189,7 @@ class JudgeReward(RewardFunction):
                 thinking_score = await self.judge(prompt=question, response=thinking_text)
             except Exception:
                 thinking_score = 0.0
-            rollout["reward_breakdown"][f"{self.name}_thinking"] = self._post_process(thinking_score)
+            _ = self._log_reward_values(rollout, thinking_score, on_thinking=True)
 
         # If configured for logging only, do not contribute to training signal
-        return 0.0 if self.log_only else reward
+        return reward

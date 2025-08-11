@@ -64,3 +64,34 @@ class RewardFunction(ABC):
         if self.max_clip is not None:
             value = max(min(value, self.max_clip), -self.max_clip)
         return value
+
+    def _log_reward_values(self, rollout: Dict, raw_value: float, *, on_thinking: bool = False) -> float:
+        """Apply post-processing, log both raw and processed, and return final value.
+
+        This centralises consistent logging so that both raw and post-processed
+        rewards are always available to the training loop (and therefore wandb).
+
+        Parameters
+        ----------
+        rollout
+            The rollout dictionary which will receive entries in
+            ``rollout['reward_breakdown']``.
+        raw_value
+            The unscaled, unclipped reward value computed by the concrete
+            subclass.
+        on_thinking
+            When True, logs under the ``*_thinking`` key variant.
+
+        Returns
+        -------
+        float
+            The value to contribute to optimisation (0.0 when ``log_only`` is True).
+        """
+        processed = self._post_process(raw_value)
+        key = self.name if not on_thinking else f"{self.name}_thinking"
+
+        breakdown = rollout.setdefault("reward_breakdown", {})
+        breakdown[key] = processed
+        breakdown[f"{key}_raw"] = raw_value
+
+        return 0.0 if self.log_only else processed
