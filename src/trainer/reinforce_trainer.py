@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import os
 from pathlib import Path
+import gc
 from typing import Dict, List
 
 import torch
@@ -435,25 +436,65 @@ class ReinforceTrainer:
 
         with tqdm(total=cfg.num_episodes, desc="Prompts processed") as pbar:
             while total_prompts_processed < cfg.num_episodes:
-                batch, prompt_iter = self._next_batch(prompt_iter, tp)
-                sequences = self._generate_sequences(batch.inputs, gen_kwargs)
-                logprob_sums = self._compute_logprobs(sequences, batch.inputs)
+                # Default skip size in case OOM occurs before batch is fully built
+                batch_size_for_skip = cfg.batch_size
+                try:
+                    batch, prompt_iter = self._next_batch(prompt_iter, tp)
+                    batch_size_for_skip = len(batch.prompts)
 
-                rewards_t, rollouts, loss = self._compute_rewards(
-                    batch.prompts, sequences, batch.inputs, logprob_sums
-                )
+                    sequences = self._generate_sequences(batch.inputs, gen_kwargs)
+                    logprob_sums = self._compute_logprobs(sequences, batch.inputs)
 
-                # Gradient accumulation / optimiser step
-                is_last_batch = (total_prompts_processed + len(batch.prompts) >= cfg.num_episodes)
-                stepped = self._backprop(loss, final_batch=is_last_batch)
+                    rewards_t, rollouts, loss = self._compute_rewards(
+                        batch.prompts, sequences, batch.inputs, logprob_sums
+                    )
 
-                # Book-keeping
-                self._store_rollouts(rollouts)
-                self._log_step(loss, rewards_t, rollouts, episode_counter)
+                    # Gradient accumulation / optimiser step
+                    is_last_batch = (
+                        total_prompts_processed + len(batch.prompts) >= cfg.num_episodes
+                    )
+                    stepped = self._backprop(loss, final_batch=is_last_batch)
 
-                # Counters / progress
-                episode_counter += 1
-                total_prompts_processed += len(batch.prompts)
-                pbar.update(len(batch.prompts))
-                if stepped:
-                    self.global_step += 1
+                    # Book-keeping
+                    self._store_rollouts(rollouts)
+                    self._log_step(loss, rewards_t, rollouts, episode_counter)
+
+                    # Counters / progress
+                    episode_counter += 1
+                    total_prompts_processed += len(batch.prompts)
+                    pbar.update(len(batch.prompts))
+                    if stepped:
+                        self.global_step += 1
+
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    # Treat runtime errors containing OOM text as CUDA OOMs as well
+                    message = str(e).lower()
+                    is_oom = isinstance(e, torch.cuda.OutOfMemoryError) or (
+                        "out of memory" in message or "cuda oom" in message
+                    )
+                    if not is_oom:
+                        raise
+
+                    print("OOM error, skipping update")
+                    # Best-effort cleanup and proceed to next gradient step
+                    try:
+                        self.optimizer.zero_grad()
+                    except Exception:
+                        pass
+                    self._accum_counter = 0
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    try:
+                        gc.collect()
+                    except Exception:
+                        pass
+
+                    # Advance counters to avoid getting stuck retrying the same batch
+                    episode_counter += 1
+                    total_prompts_processed += batch_size_for_skip
+                    pbar.update(batch_size_for_skip)
+                    # Continue training loop
+                    continue
