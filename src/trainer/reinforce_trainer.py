@@ -15,6 +15,7 @@ import gc
 from typing import Dict, List
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import wandb
 from accelerate import Accelerator
@@ -432,15 +433,25 @@ class ReinforceTrainer:
 
         prompt_iter = iter(self.prompt_builder)
         episode_counter = 0
-        total_prompts_processed = 0
+        global_prompts_processed = 0
+        is_main_process = self.accelerator.is_local_main_process
+        world_size = getattr(self.accelerator, "num_processes", 1)
 
-        with tqdm(total=cfg.num_episodes, desc="Prompts processed") as pbar:
-            while total_prompts_processed < cfg.num_episodes:
+        with tqdm(total=cfg.num_episodes, desc="Prompts processed", disable=not is_main_process) as pbar:
+            while global_prompts_processed < cfg.num_episodes:
                 # Default skip size in case OOM occurs before batch is fully built
                 batch_size_for_skip = cfg.batch_size
                 try:
                     batch, prompt_iter = self._next_batch(prompt_iter, tp)
                     batch_size_for_skip = len(batch.prompts)
+
+                    # Compute global batch size across all processes
+                    local_batch_size = len(batch.prompts)
+                    global_batch_size = local_batch_size
+                    if world_size > 1 and dist.is_available() and dist.is_initialized():
+                        bs_tensor = torch.tensor([local_batch_size], device=self.model.device, dtype=torch.int64)
+                        dist.all_reduce(bs_tensor, op=dist.ReduceOp.SUM)
+                        global_batch_size = int(bs_tensor.item())
 
                     sequences = self._generate_sequences(batch.inputs, gen_kwargs)
                     logprob_sums = self._compute_logprobs(sequences, batch.inputs)
@@ -451,7 +462,7 @@ class ReinforceTrainer:
 
                     # Gradient accumulation / optimiser step
                     is_last_batch = (
-                        total_prompts_processed + len(batch.prompts) >= cfg.num_episodes
+                        global_prompts_processed + global_batch_size >= cfg.num_episodes
                     )
                     stepped = self._backprop(loss, final_batch=is_last_batch)
 
@@ -461,8 +472,10 @@ class ReinforceTrainer:
 
                     # Counters / progress
                     episode_counter += 1
-                    total_prompts_processed += len(batch.prompts)
-                    pbar.update(len(batch.prompts))
+                    global_prompts_processed += global_batch_size
+                    if is_main_process:
+                        remaining = cfg.num_episodes - pbar.n
+                        pbar.update(min(global_batch_size, remaining))
                     if stepped:
                         self.global_step += 1
 
@@ -494,7 +507,15 @@ class ReinforceTrainer:
 
                     # Advance counters to avoid getting stuck retrying the same batch
                     episode_counter += 1
-                    total_prompts_processed += batch_size_for_skip
-                    pbar.update(batch_size_for_skip)
+                    # Compute global skip size across all processes
+                    global_skip = batch_size_for_skip
+                    if world_size > 1 and dist.is_available() and dist.is_initialized():
+                        skip_tensor = torch.tensor([batch_size_for_skip], device=self.model.device, dtype=torch.int64)
+                        dist.all_reduce(skip_tensor, op=dist.ReduceOp.SUM)
+                        global_skip = int(skip_tensor.item())
+                    global_prompts_processed += global_skip
+                    if is_main_process:
+                        remaining = cfg.num_episodes - pbar.n
+                        pbar.update(min(global_skip, remaining))
                     # Continue training loop
                     continue
