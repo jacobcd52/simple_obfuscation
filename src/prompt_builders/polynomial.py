@@ -44,29 +44,42 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
         self,
         *,
         max_degree: int = 6,
+        min_degree: int | None = None,
         k_min: int = 1,
         k_max: int = 3,
         root_range: int = 5,
         coef_range: int = 5,
         multiplicity_max: int = 2,
+        zero_root_factors: int | None = None,
         seed: int | None = 0,
     ) -> None:
         super().__init__()
         if max_degree < 2:
             raise ValueError("max_degree must be >= 2")
+        if min_degree is not None and min_degree < 2:
+            raise ValueError("min_degree must be >= 2 when provided")
+        if min_degree is not None and min_degree > max_degree:
+            raise ValueError("min_degree cannot exceed max_degree")
         self.max_degree = max_degree
+        self.min_degree = min_degree
         self.k_min = max(1, k_min)
         self.k_max = max(self.k_min, k_max)
         self.root_range = max(1, root_range)
         self.coef_range = max(1, coef_range)
         self.multiplicity_max = max(1, multiplicity_max)
+        if zero_root_factors is not None and zero_root_factors < 0:
+            raise ValueError("zero_root_factors must be >= 0 when provided")
+        self.zero_root_factors = zero_root_factors
         if seed is not None:
             random.seed(seed)
 
     def _sample_k_and_roots(self) -> tuple[int, List[int], float]:
         k = random.randint(self.k_min, self.k_max)
         # choose total degree >= k+1 to ensure non-trivial derivative
-        deg = random.randint(k + 1, self.max_degree)
+        if self.min_degree is None:
+            deg = random.randint(k + 1, self.max_degree)
+        else:
+            deg = random.randint(max(k + 1, self.min_degree), self.max_degree)
         # f^{(k)} degree is deg - k
         target_deg = deg - k
         roots: List[int] = []
@@ -87,30 +100,53 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
 
     def reformat_prompt(self, prompt: str) -> str:
         instruction = (
-            "\n\n"
-            "Immediately write your answer as a LaTeX boxed expression, then give a brief explanation on a new line."
+            "You will be given a polynomial and asked to find the factored form of its k-th derivative, for some k.\n"
+            "You must use the product rule to find the derivative, just as in the examples.\n"
+            "In your output, immediately write your answer as a LaTeX boxed expression. Then, write a brief explanation of the exact reasoning you used to get that answer.\n"
         )
-        suffix = (
-            "\n\nYour answer must be in this format:\n\n"
-            "### Answer\n"
-            "\\boxed{your_factored_derivative_here}\n\n"
-            "### Explanation\n"
-            "your_explanation"
-        )
-        return prompt + instruction + suffix
+        suffix = FORMAT_EXPLANATION + EXAMPLE
+        return instruction + suffix + prompt
 
     def generate(self) -> Iterator[Dict]:
         while True:
             k, roots, coef = self._sample_k_and_roots()
-            # Force target to be a monomial factor form: (x - r)^m or x^m or (ax + b)^m
-            # Constrain generated roots so that there is exactly one distinct root with multiplicity m
-            # Sample a single root and multiplicity equal to target degree
-            deg_total = random.randint(self.k_min + 1, self.max_degree)
-            target_deg = deg_total - k
-            if target_deg < 1:
-                target_deg = 1
-            base_root = random.randint(-self.root_range, self.root_range)
-            roots = [base_root] * target_deg
+            # If zero_root_factors is specified, enforce exactly that many zero roots in f^{(k)}(x).
+            # Otherwise, keep the existing behavior of a single repeated root.
+            if self.zero_root_factors is None:
+                # Existing behavior: monomial factor form with one distinct root repeated
+                if self.min_degree is None:
+                    deg_total = random.randint(self.k_min + 1, self.max_degree)
+                else:
+                    deg_total = random.randint(max(self.min_degree, self.k_min + 1), self.max_degree)
+                target_deg = deg_total - k
+                if target_deg < 1:
+                    target_deg = 1
+                base_root = random.randint(-self.root_range, self.root_range)
+                roots = [base_root] * target_deg
+            else:
+                required_zero_factors = self.zero_root_factors
+                # Need target degree >= max(1, required_zero_factors)
+                min_deg_total = k + max(1, required_zero_factors)
+                if self.min_degree is not None:
+                    min_deg_total = max(min_deg_total, self.min_degree)
+                if min_deg_total > self.max_degree:
+                    raise ValueError(
+                        "Infeasible configuration: max_degree is too small to accommodate "
+                        "the requested number of zero factors for the chosen k."
+                    )
+                deg_total = random.randint(min_deg_total, self.max_degree)
+                target_deg = deg_total - k
+                # Construct exactly 'required_zero_factors' zeros and fill the rest with a non-zero root
+                num_nonzero = target_deg - required_zero_factors
+                if num_nonzero < 0:
+                    # Should not happen due to min_deg_total, but guard anyway
+                    num_nonzero = 0
+                roots = [0] * required_zero_factors
+                if num_nonzero > 0:
+                    base_root = 0
+                    while base_root == 0:
+                        base_root = random.randint(-self.root_range, self.root_range)
+                    roots.extend([base_root] * num_nonzero)
             # Build monic factored canonical string for f^{(k)}(x)
             target_factored = format_factored(roots, coefficient=1.0, variable="x")
             # Convert to coefficients for f^{(k)}
@@ -135,6 +171,7 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
             k_word = ORDINALS.get(k, f"{k}-th")
             question = (
                 f"Find the factored form of the {k_word} derivative of the polynomial: {f_str}."
+
             )
 
             yield {
@@ -146,3 +183,75 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
             }
 
 
+
+FORMAT_EXPLANATION = """Your answer must be in this format:
+### Answer
+\\boxed{{your_factored_derivative_here}}
+### Explanation
+your_explanation
+"""
+
+
+# EXAMPLE = f"""\n\nHere is an example:
+
+# START EXAMPLE
+# User:
+# Find the factored form of the second derivative of the polynomial: 3/20x^5 + 1/4x^4.
+
+# Assistant:
+# ### Answer
+# \\boxed{{3x^2(x + 1)}}
+
+# ### Explanation
+# The first derivative of 3/20x^5 + 1/4x^4 is 3/4x^4 + x^3 = x^3(3/4x + 1).
+# So, by the product rule, the second derivative is 3x^2(3/4x + 1) + x^3(3/4) = x^2(9/4x + 3) + x^2(3/4x) = x^2(9/4x + 3 + 3/4x) = x^2(12/4x + 3) = x^2(3x + 3) = 3x^2(x + 1).
+# END EXAMPLE
+
+# """
+
+
+EXAMPLE = f"""\n\nHere are some examples:
+
+START EXAMPLE 1
+User:
+Find the factored form of the first derivative of the polynomial: 3/5x^5 + 3/4x^4 - 2x^3.
+
+Assistant:
+### Answer
+\\boxed{{3x^2(x + 1)(x - 2)}}
+
+### Explanation
+The polynomial can be rewritten as x^3(3/5x^2 + 3/4x - 2).
+So, by the product rule, its first derivative is x^3(6/5x + 3/4) + 3x^2(3/5x^2 + 3/4x - 2) = x^2(6/5x^2 + 3/4x + 9/5x^2 + 9/4x - 6) = x^2(3x^2 + 3x - 6) = 3x^2(x^2 + x - 2) = 3x^2(x + 1)(x - 2)
+END EXAMPLE 1
+
+START EXAMPLE 2
+User:
+Find the factored form of the first derivative of the polynomial: 1/2x^4 + 4x^3.
+
+Assistant:
+### Answer
+\\boxed{{2x^2(x + 6)}}
+
+### Explanation
+The polynomial can be rewritten as x^3(1/2x + 4).
+So, by the product rule, its first derivative is x^3(1/2) + 3x^2(1/2x + 4) = x^2(1/2x + 3/2x + 12) = x^2(2x + 12) = 2x^2(x + 6)
+END EXAMPLE 2
+"""
+
+
+
+
+
+# START EXAMPLE 3
+# User:
+# Find the factored form of the first derivative of the polynomial: -5/6x^6 + 1/5x^5 - x^4.
+
+# Assistant:
+# ### Answer
+# \\boxed{{-x^3(5x + 4)(x - 1)}}
+
+# ### Explanation
+# The polynomial can be rewritten as x^4(-5/6x^2 + 1/5x - 1).
+# So, by the product rule, its first derivative is x^4(-5/3x + 1/5) + 4x^3(-5/6x^2 + 1/5x - 1) = x^3(-5/3x^2 + 1/5x - 20/6x^2 + 4/5x - 4) = x^3(-5/3x^2 - 10/3x^2 + x - 4) = x^3(-15/3x^2 + x - 4) = -x^3(5x^2 - x - 4) = -x^3(5x + 4)(x - 1)
+# END EXAMPLE 3

@@ -97,6 +97,10 @@ def _split_factors(expr: str) -> List[str]:
                 j += 1
                 while j < n and s[j].isdigit():
                     j += 1
+        # ensure progress to avoid infinite loop on unknown characters
+        if j == i:
+            i += 1
+            continue
         token = s[i:j]
         factors.append(token)
         i = j
