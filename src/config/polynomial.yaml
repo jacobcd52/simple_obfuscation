@@ -1,17 +1,17 @@
 # Run python scripts/train.py --config mmlu.yaml
 
-model_name: "Qwen/Qwen3-4B"
+model_name: "Qwen/Qwen3-14B"
 
-batch_size: 10
-grad_accum_steps: 2
+batch_size: 2
+grad_accum_steps: 4
 num_episodes: 3200
 learning_rate: 1e-5
-thinking_max_tokens: 400
-output_max_tokens: 700
-multi_gpu: "none"
+thinking_max_tokens: 800
+output_max_tokens: 1000
+multi_gpu: "fsdp"
 
 wandb_project: "polynomial"
-wandb_run_name: "no penalty 4B"
+wandb_run_name: "no penalty 14B"
 
 # Prompt builder – use the built-in MMLU dataset.
 prompt_builder_cls: "src.prompt_builders.polynomial.PolynomialDerivativePromptBuilder"
@@ -32,6 +32,6 @@ rewards:
     
   - cls: "expanded_polynomial"
     params:
-      coefficient: 0.0
+      coefficient: 0
       log_thinking: true
 

@@ -394,20 +394,47 @@ class ReinforceTrainer:
             self.rollout_store.save(rollout)
 
     def _log_step(self, loss, rewards_t, rollouts, episode_counter):
-        # Aggregate reward breakdowns (mean over batch) for logging
-        breakdown_totals = {}
+        # Aggregate reward breakdowns (mean over GLOBAL batch across all processes)
+        # First, compute local totals
+        breakdown_totals_local = {}
         for rollout in rollouts:
             for k, v in rollout.get("reward_breakdown", {}).items():
-                breakdown_totals[k] = breakdown_totals.get(k, 0.0) + v
-        breakdown_means = {f"reward/{k}": v / len(rollouts) for k, v in breakdown_totals.items()}
+                breakdown_totals_local[k] = breakdown_totals_local.get(k, 0.0) + v
+
+        # Prepare tensors for distributed reduction
+        device = getattr(self.model, "device", rewards_t.device)
+        local_count = torch.tensor([len(rollouts)], device=device, dtype=torch.int64)
+        reward_sum_local = rewards_t.to(torch.float32).sum()
+
+        # Copy to tensors we can all-reduce
+        reward_sum_global = reward_sum_local.clone()
+        count_global = local_count.clone()
+
+        # Reduce reward sum and count across processes (if distributed)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(reward_sum_global, op=dist.ReduceOp.SUM)
+            dist.all_reduce(count_global, op=dist.ReduceOp.SUM)
+
+        # Compute global mean reward
+        total_count = max(1, int(count_global.item()))
+        reward_mean_global = (reward_sum_global.item() / total_count)
+
+        # Reduce breakdown sums across processes key-by-key
+        breakdown_means_global = {}
+        for k, v in breakdown_totals_local.items():
+            t_local = torch.tensor([float(v)], device=device, dtype=torch.float32)
+            t_global = t_local.clone()
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(t_global, op=dist.ReduceOp.SUM)
+            breakdown_means_global[f"reward/{k}"] = t_global.item() / total_count
 
         log_dict = {
             "loss": loss.item(),
-            "reward/mean": rewards_t.mean().item(),
+            "reward/mean": reward_mean_global,
             "episode": episode_counter,
             "global_step": self.global_step,
         }
-        log_dict.update(breakdown_means)
+        log_dict.update(breakdown_means_global)
 
         if self.accelerator.is_local_main_process:
             # Use a unique per-batch step to avoid overwriting logs when using
