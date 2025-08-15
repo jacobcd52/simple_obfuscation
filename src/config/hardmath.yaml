@@ -1,6 +1,6 @@
 model_name: "Qwen/Qwen3-4B"
 
-batch_size: 8
+batch_size: 12
 grad_accum_steps: 1
 num_episodes: 2000
 learning_rate: 1e-5
@@ -11,10 +11,11 @@ multi_gpu: "ddp"
 wandb_project: "hardmath hints"
 wandb_run_name: "qwen3-4b"
 
-# Prompt builder – HARDMath dataset via direct JSON URL
+# Prompt builder – DAFT-Math dataset via HuggingFace
 prompt_builder_cls: "src.prompt_builders.hardmath.HardMathPromptBuilder"
 prompt_builder_params:
-  dataset_url: "https://raw.githubusercontent.com/sarahmart/HARDMath/refs/heads/main/data/HARDMath.json"
+  hf_dataset: "metr-evals/daft-math"
+  hf_split: "train"
 
 rewards:
   - cls: "boxed_answer"
@@ -24,9 +25,9 @@ rewards:
 
   - cls: "judge_reward"
     params:
-      model: "gpt-4o-mini"
+      model: "gpt-4.1-mini"
       coefficient: -2.0
       log_thinking: true
-      judge_prompt_template: "hint_used"
+      judge_prompt_template: "hard_math"
 
 
