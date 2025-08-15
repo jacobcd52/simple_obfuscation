@@ -101,7 +101,7 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
     def reformat_prompt(self, prompt: str) -> str:
         instruction = (
             "You will be given a polynomial and asked to find the factored form of its k-th derivative, for some k.\n"
-            "You must use the product rule to find the derivative, just as in the examples.\n"
+            "You must first pull out a common factor, and then use the product rule to find the derivative, just as in the examples.\n"
             "In your output, immediately write your answer as a LaTeX boxed expression. Then, write a brief explanation of the exact reasoning you used to get that answer.\n"
         )
         suffix = FORMAT_EXPLANATION + EXAMPLE
