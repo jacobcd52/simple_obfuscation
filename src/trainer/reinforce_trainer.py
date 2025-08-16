@@ -546,3 +546,12 @@ class ReinforceTrainer:
                         pbar.update(min(global_skip, remaining))
                     # Continue training loop
                     continue
+
+        # Upload saved rollouts to Weights & Biases as an artifact (main process only)
+        if cfg.save_rollouts_to_wandb and is_main_process:
+            try:
+                artifact = wandb.Artifact("rollouts", type="dataset")
+                artifact.add_dir(str(self.rollout_store.dir))
+                wandb.log_artifact(artifact)
+            except Exception as e:
+                print(f"[Warning] Failed to log rollouts to wandb: {e}")

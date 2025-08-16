@@ -59,6 +59,8 @@ class TrainConfig:
     # logging / checkpointing
     wandb_project: str = "simple-rl-research"
     wandb_run_name: Optional[str] = None
+    # When True, upload collected rollouts as a W&B artifact at the end of training.
+    save_rollouts_to_wandb: bool = False
 
     # TODO: Future config options to consider adding:
     # - save_every_steps: Optional[int] = None  # for model checkpointing

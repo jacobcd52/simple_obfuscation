@@ -50,7 +50,7 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
         root_range: int = 5,
         coef_range: int = 5,
         multiplicity_max: int = 2,
-        zero_root_factors: int | None = None,
+        num_nonzero_roots: int | None = None,
         seed: int | None = 0,
     ) -> None:
         super().__init__()
@@ -67,9 +67,9 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
         self.root_range = max(1, root_range)
         self.coef_range = max(1, coef_range)
         self.multiplicity_max = max(1, multiplicity_max)
-        if zero_root_factors is not None and zero_root_factors < 0:
-            raise ValueError("zero_root_factors must be >= 0 when provided")
-        self.zero_root_factors = zero_root_factors
+        if num_nonzero_roots is not None and num_nonzero_roots < 0:
+            raise ValueError("num_nonzero_roots must be >= 0 when provided")
+        self.num_nonzero_roots = num_nonzero_roots
         if seed is not None:
             random.seed(seed)
 
@@ -101,7 +101,6 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
     def reformat_prompt(self, prompt: str) -> str:
         instruction = (
             "You will be given a polynomial and asked to find the factored form of its k-th derivative, for some k.\n"
-            "You must first pull out a common factor, and then use the product rule to find the derivative, just as in the examples.\n"
             "In your output, immediately write your answer as a LaTeX boxed expression. Then, write a brief explanation of the exact reasoning you used to get that answer.\n"
         )
         suffix = FORMAT_EXPLANATION + EXAMPLE
@@ -110,9 +109,9 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
     def generate(self) -> Iterator[Dict]:
         while True:
             k, roots, coef = self._sample_k_and_roots()
-            # If zero_root_factors is specified, enforce exactly that many zero roots in f^{(k)}(x).
+            # If num_nonzero_roots is specified, enforce exactly that many non-zero roots in f^{(k)}(x).
             # Otherwise, keep the existing behavior of a single repeated root.
-            if self.zero_root_factors is None:
+            if self.num_nonzero_roots is None:
                 # Existing behavior: monomial factor form with one distinct root repeated
                 if self.min_degree is None:
                     deg_total = random.randint(self.k_min + 1, self.max_degree)
@@ -124,24 +123,25 @@ class PolynomialDerivativePromptBuilder(PromptBuilder):
                 base_root = random.randint(-self.root_range, self.root_range)
                 roots = [base_root] * target_deg
             else:
-                required_zero_factors = self.zero_root_factors
-                # Need target degree >= max(1, required_zero_factors)
-                min_deg_total = k + max(1, required_zero_factors)
+                required_nonzero = self.num_nonzero_roots
+                # Need target degree >= max(1, required_nonzero)
+                min_deg_total = k + max(1, required_nonzero)
                 if self.min_degree is not None:
                     min_deg_total = max(min_deg_total, self.min_degree)
                 if min_deg_total > self.max_degree:
                     raise ValueError(
                         "Infeasible configuration: max_degree is too small to accommodate "
-                        "the requested number of zero factors for the chosen k."
+                        "the requested number of non-zero roots for the chosen k."
                     )
                 deg_total = random.randint(min_deg_total, self.max_degree)
                 target_deg = deg_total - k
-                # Construct exactly 'required_zero_factors' zeros and fill the rest with a non-zero root
-                num_nonzero = target_deg - required_zero_factors
-                if num_nonzero < 0:
+                # Construct exactly 'required_nonzero' non-zero roots and fill the rest with zeros
+                num_nonzero = required_nonzero
+                num_zeros = target_deg - num_nonzero
+                if num_zeros < 0:
                     # Should not happen due to min_deg_total, but guard anyway
-                    num_nonzero = 0
-                roots = [0] * required_zero_factors
+                    num_zeros = 0
+                roots = [0] * num_zeros
                 if num_nonzero > 0:
                     base_root = 0
                     while base_root == 0:
@@ -214,15 +214,14 @@ EXAMPLE = f"""\n\nHere are some examples:
 
 START EXAMPLE 1
 User:
-Find the factored form of the first derivative of the polynomial: 3/5x^5 + 3/4x^4 - 2x^3.
-
+Find the factored form of the first derivative of the polynomial: 3/7x^7 + 1/2x^6 - 6/5x^5.
 Assistant:
 ### Answer
-\\boxed{{3x^2(x + 1)(x - 2)}}
+\\boxed{{3x^4(x + 1)(x - 2)}}
 
 ### Explanation
-The polynomial can be rewritten as x^3(3/5x^2 + 3/4x - 2).
-So, by the product rule, its first derivative is x^3(6/5x + 3/4) + 3x^2(3/5x^2 + 3/4x - 2) = x^2(6/5x^2 + 3/4x + 9/5x^2 + 9/4x - 6) = x^2(3x^2 + 3x - 6) = 3x^2(x^2 + x - 2) = 3x^2(x + 1)(x - 2)
+The polynomial can be rewritten as x^5(3/7x^2 + 1/2x - 6/5).
+So, by the product rule, its first derivative is 5x^4(3/7x^2 + 1/2x - 6/5) + x^5(6/7x + 1/2) = x^4(15/7x^2 + 5/2x - 6 + 6/7x^2 + 1/2x) = x^4(21/7x^2 + 6/2x - 6) = x^4(3x^2 + 3x - 6) = 3x^4(x^2 + x - 2) = 3x^4(x + 1)(x - 2)
 END EXAMPLE 1
 
 START EXAMPLE 2
