@@ -1,8 +1,3 @@
-# simple_obfuscation – Repository Map for LLM Agents
-
-This README is intentionally optimized for automated reading and parsing by large-language-model agents.  It focuses on **directory-level structure** and the **primary responsibilities** of each component instead of human-oriented prose.
-
----
 ## 1. Root-Level Layout
 
 | Path                       | Purpose |
@@ -56,7 +51,7 @@ File | Responsibility
 Component | Description
 --------- | -----------
 `__init__.py` | Pydantic/Hydra config objects with sensible defaults.
-`mmlu.yaml` | YAML override for the MMLU benchmarking task.
+`[task].yaml` | YAML override for [task].
 
 ### 2.5 `utils/`
 File | Responsibility
@@ -76,19 +71,6 @@ File | Responsibility
 `tests/` contains **pytest**-based validation for registry loading, prompt generation, masking logic, and utility functions.  These tests are valuable examples of expected behaviours.
 
 ---
-## 5. Quickstart for Agents
-
-1.  Install deps:
-    ```bash
-    pip install -r requirements.txt
-    ```
-2.  Launch a dry-run train (small model):
-    ```bash
-    python scripts/train.py --config-name mmlu
-    ```
-3.  Rewards, prompts, and configs are **pluggable** – add a new class under the respective sub-package and register it via the exposed registries.
-
----
 ## 6. Extensibility Signals
 
 LLM agents can introspect the following single-source-of-truth points:
@@ -100,8 +82,3 @@ Key Symbol | Location | Role
 `ReinforceTrainer.train()` | `src/trainer/reinforce_trainer.py` | Main training loop.
 
 These are the safest hooks for code modification or reflection.
-
----
-## 7. License
-
-This repository is released under the MIT License (see `pyproject.toml` for metadata).

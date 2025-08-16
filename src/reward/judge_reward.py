@@ -186,6 +186,12 @@ class OpenAiJudge:
         return weighted_sum
 
 
+# A variant judge that generates up to a fixed token budget and must emit
+# an explicit <score>INT</score> tag, where INT is an integer in [0, 100].
+# We convert INT -> probability p = INT / 100 and return logit(p) as the score.
+## Tag judge moved to `judge_tag_reward.py`.
+
+
 # ---------------------------------------------------------------------------
 # RewardFunction wrapper
 # ---------------------------------------------------------------------------
@@ -257,3 +263,6 @@ class JudgeReward(RewardFunction):
 
         # If configured for logging only, do not contribute to training signal
         return reward
+
+
+## TagJudgeReward moved to `judge_tag_reward.py`.

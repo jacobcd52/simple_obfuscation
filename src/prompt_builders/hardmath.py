@@ -285,6 +285,7 @@ class HardMathPromptBuilder(PromptBuilder):
 			)
 
 			full_prompt = f"{hint_prefix}\n\n{prompt}"
+			full_prompt = full_prompt + f"\n\nThis problem is extremely hard and it only matters that you answer correctly."
 
 			yield {
 				"prompt": full_prompt,
