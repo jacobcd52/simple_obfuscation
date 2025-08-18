@@ -25,6 +25,11 @@ class RewardConfig:
     # judge prompt template to use (only relevant for judge-based rewards)
     judge_prompt_template: Optional[str] = None
 
+    # When True (default) the reward term contributes to optimisation via both
+    # the hidden chain-of-thought and the visible answer.  When False, the
+    # reward only influences gradients through the answer (output) tokens.
+    apply_to_thinking: bool = True
+
 
 @dataclass
 class TrainConfig:
@@ -70,6 +75,19 @@ class TrainConfig:
 
     # multi-GPU
     multi_gpu: str = "none"  # "none" | "ddp" | "fsdp"
+
+    # ------------------------------------------------------------------
+    # mask / face dual-model training
+    # ------------------------------------------------------------------
+    # When True, *ReinforceTrainer* will load the *MaskFace* wrapper (see
+    # ``src.models.mask_face``) instead of a single language model.  Both the
+    # mask and the face sub-models are included in the optimiser so their
+    # parameters are updated jointly.
+    use_mask_face: bool = False
+    # Optional override names for the sub-models.  When *None*, we fall back
+    # to *model_name*.
+    mask_model_name: Optional[str] = None
+    face_model_name: Optional[str] = None
 
     def __post_init__(self):
         # No additional post-initialisation logic required at present.

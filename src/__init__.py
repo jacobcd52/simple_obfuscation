@@ -13,4 +13,5 @@ __all__ = [
     "reward",
     "trainer",
     "utils",
+    "models",
 ]

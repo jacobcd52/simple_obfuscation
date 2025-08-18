@@ -106,17 +106,35 @@ class ReinforceTrainer:
             raise ValueError(f"Unknown multi_gpu setting: {cfg.multi_gpu}")
 
         # ------------------------------------------------------------------
-        # model / tokenizer
+        # model / tokenizer (with optional MaskFace wrapper)
         # ------------------------------------------------------------------
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            cfg.model_name, padding_side=cfg.padding_side, use_fast=True, trust_remote_code=True
-        )
-        if getattr(cfg, "enable_thinking", True):
-            self.tokenizer.enable_thinking = True  # type: ignore[attr-defined]
-        if self.tokenizer.pad_token is None:
-            # Many GPT-style tokenizers lack a pad token; use eos as fallback.
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(cfg.model_name, torch_dtype=torch.bfloat16)
+        if getattr(cfg, "use_mask_face", False):
+            from ..models.mask_face import MaskFace
+
+            mask_name = cfg.mask_model_name or cfg.model_name
+            face_name = cfg.face_model_name or cfg.model_name
+
+            self.model = MaskFace(
+                mask_model_name=mask_name,
+                face_model_name=face_name,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                batch_size=cfg.batch_size,
+                max_thinking_tokens=cfg.thinking_max_tokens or 0,
+                min_thinking_tokens=cfg.thinking_min_tokens,
+            )
+
+            self.tokenizer = self.model.tokenizer
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                cfg.model_name, padding_side=cfg.padding_side, use_fast=True, trust_remote_code=True
+            )
+            if getattr(cfg, "enable_thinking", True):
+                self.tokenizer.enable_thinking = True  # type: ignore[attr-defined]
+            if self.tokenizer.pad_token is None:
+                # Many GPT-style tokenizers lack a pad token; use eos as fallback.
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            self.model = AutoModelForCausalLM.from_pretrained(cfg.model_name, torch_dtype=torch.bfloat16)
 
         # ------------------------------------------------------------------
         # prompt builder
@@ -130,19 +148,29 @@ class ReinforceTrainer:
         # ------------------------------------------------------------------
         from ..reward import get_reward_class  # local import to avoid circular
 
+        # ------------------------------------------------------------------
+        # Reward functions & apply flags
+        # ------------------------------------------------------------------
         self.rewards: List[RewardFunction] = []
-        # if no rewards specified, use default BoxedAnswerReward
+        self.rewards_apply_flags: List[bool] = []
+
+        def _append_reward(rwd_instance: RewardFunction, apply_flag: bool):
+            self.rewards.append(rwd_instance)
+            self.rewards_apply_flags.append(apply_flag)
+
+        # If no rewards specified, use default BoxedAnswerReward
         if not cfg.rewards:
             cls = get_reward_class("boxed_answer")
-            self.rewards.append(cls())
+            _append_reward(cls(), True)
 
         for rw in cfg.rewards:
+            apply_flag = getattr(rw, "apply_to_thinking", True)
             if "." in rw.cls:
-                cls = _instantiate_class(rw.cls, **rw.params)
-                self.rewards.append(cls)
+                inst = _instantiate_class(rw.cls, **rw.params)
+                _append_reward(inst, apply_flag)
             else:
                 cls = get_reward_class(rw.cls)
-                self.rewards.append(cls(**rw.params))
+                _append_reward(cls(**rw.params), apply_flag)
 
         self.rollout_store = RolloutStore("rollouts")
 
@@ -253,16 +281,52 @@ class ReinforceTrainer:
             prompt_texts.append(chat_str)
 
         inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
-        return Batch(prompts, prompt_texts, inputs), prompt_iter
+
+        # Store raw prompt texts for potential MaskFace generation.  We make a
+        # *shallow* copy to avoid side-effects when the dict is later passed
+        # into HF generate (the extra key is removed beforehand).
+        inputs_with_texts = {k: v for k, v in inputs.items()}
+        inputs_with_texts["_prompt_texts"] = prompt_texts  # type: ignore[assignment]
+        return Batch(prompts, prompt_texts, inputs_with_texts), prompt_iter
 
     def _generate_sequences(self, inputs, gen_kwargs):
-        """Run `model.generate` under autocast & without gradient."""
+        """Run `model.generate` taking MaskFace wrapper into account."""
+        # When using MaskFace we call its specialised `generate` API.
+        from ..models.mask_face import MaskFace  # local import to avoid hard dep when unused
+
+        if isinstance(self.model, MaskFace):
+            # inputs are not required – we rely on prompt texts instead.
+            # We expect that `inputs` contains *prompt_texts* provided under a
+            # special key injected by `_next_batch`.
+            prompt_texts = inputs.pop("_prompt_texts")  # type: ignore[arg-type]
+            max_think = self.cfg.thinking_max_tokens or 0
+            max_new = self.cfg.output_max_tokens or 512
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                safe_kwargs = {k: v for k, v in gen_kwargs.items() if k != "logits_processor"}
+                generated = self.model.generate(
+                    prompt_inputs=prompt_texts,
+                    max_thinking_tokens=max_think,
+                    max_new_tokens=max_new,
+                    **safe_kwargs,
+                )
+            return generated.sequences
+
+        # ----- Standard single-model path -----
+        safe_inputs = {k: v for k, v in inputs.items() if k != "_prompt_texts"}
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            generated = self._generate(**inputs, **gen_kwargs)
+            generated = self._generate(**safe_inputs, **gen_kwargs)
         return generated.sequences  # (batch, seq_len)
 
     def _compute_logprobs(self, sequences, inputs):
-        """Compute summed log-probabilities of newly generated tokens."""
+        """Compute summed log-probabilities of newly generated tokens.
+
+        Returns a tuple of three 1-D tensors of length *batch*:
+        (logprob_total, logprob_thinking, logprob_output)
+        where *thinking* refers to tokens up to and **including** the first
+        ``</think>`` token, and *output* refers to tokens after that marker.
+        When the end marker is absent, the whole generation is considered
+        thinking and *logprob_output* becomes zero.
+        """
         # Shift inputs/targets for language-modeling likelihood
         input_ids_full = sequences[:, :-1]
         target_ids = sequences[:, 1:]
@@ -274,93 +338,169 @@ class ReinforceTrainer:
 
         token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
 
-        # Mask newly generated tokens (positions >= prompt length)
-        prompt_len = inputs["input_ids"].shape[1]
+        # Mask newly generated tokens (positions >= prompt length per-sample)
         seq_len = sequences.shape[1]
-        mask_full = (
-            torch.arange(seq_len, device=sequences.device)
-            .unsqueeze(0)
-            .expand(sequences.size(0), -1)
-            >= prompt_len
-        )
+        arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
+        prompt_lens = (inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
+        mask_full = arange_seq.expand(sequences.size(0), -1) >= prompt_lens.unsqueeze(1)
         mask = mask_full[:, 1:]  # align with targets
         selected_logprobs = token_logprobs * mask.float()
-        logprob_sums = selected_logprobs.sum(dim=1)
-        return logprob_sums
 
-    def _compute_rewards(self, prompts, sequences, inputs, logprob_sums):
-        """Compute rewards (handles sync + async) and return rollouts & loss."""
+        # ------------------------------------------------------------------
+        # Split into thinking / output segments per sample
+        # ------------------------------------------------------------------
+        end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
+
+        B, Lm1 = selected_logprobs.shape  # seq_len-1
+        indices = torch.arange(sequences.shape[1], device=sequences.device)
+
+        logprob_thinking = torch.zeros(B, device=sequences.device)
+        logprob_output = torch.zeros(B, device=sequences.device)
+
+        for b in range(B):
+            # Absolute position (in *sequences*) of the first </think> token.
+            seq_list = sequences[b].tolist()
+            prompt_len = prompt_lens[b].item()
+            try:
+                rel_idx = seq_list[prompt_len:].index(end_think_id)
+                end_idx = prompt_len + rel_idx  # inclusive position of </think>
+            except ValueError:
+                end_idx = len(seq_list) - 1  # treat all generated as thinking
+
+            # Convert to target index space (length L-1) – target idx t predicts token t+1
+            target_end_idx = max(end_idx - 1, prompt_len)  # ensure non-negative
+
+            think_mask_row = torch.zeros(Lm1, dtype=torch.bool, device=sequences.device)
+            output_mask_row = torch.zeros(Lm1, dtype=torch.bool, device=sequences.device)
+
+            think_mask_row[prompt_len: target_end_idx + 1] = True
+            output_mask_row[target_end_idx + 1 :] = True
+
+            logprob_thinking[b] = (token_logprobs[b] * think_mask_row.float()).sum()
+            logprob_output[b] = (token_logprobs[b] * output_mask_row.float()).sum()
+
+        logprob_total = logprob_thinking + logprob_output
+        return logprob_total, logprob_thinking, logprob_output
+
+    def _compute_rewards(
+        self,
+        prompts,
+        sequences,
+        inputs,
+        logprob_total,
+        logprob_thinking,
+        logprob_output,
+    ):
+        """Compute rewards and REINFORCE loss with *apply_to_thinking* control."""
+
+        # ------------------------------------------------------------------
+        # Evaluate reward functions (sync & async support) -------------------
+        # ------------------------------------------------------------------
         rollouts: List[Dict] = []
-        rewards = []
-        # Detect async reward functions once
-        has_async = any(inspect.iscoroutinefunction(rwd.__call__) for rwd in self.rewards)
+        num_rewards = len(self.rewards)
+
+        # We'll build a *tensor* of shape (num_rewards, B)
+        reward_values = torch.zeros((num_rewards, len(prompts)), device=sequences.device)
+
+        has_async = any(inspect.iscoroutinefunction(r.__call__) for r in self.rewards)
 
         if has_async:
-            async def _compute_async():
-                all_async_tasks = []
+            async def _async_eval():
+                all_tasks = []
+                task_to_index = {}
                 rollout_data = []
+
                 for i, p in enumerate(prompts):
                     response_text = self.tokenizer.decode(
                         sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True
                     )
                     rollout = dict(p)
                     rollout["response"] = response_text
-                    rollout_sync_rewards = []
-                    rollout_tasks = []
-                    for rwd in self.rewards:
+
+                    sync_results = []
+                    async_tasks = []
+                    for j, rwd in enumerate(self.rewards):
                         if inspect.iscoroutinefunction(rwd.__call__):
                             task = rwd(rollout)
-                            rollout_tasks.append(task)
-                            all_async_tasks.append(task)
+                            async_tasks.append((task, j))
+                            all_tasks.append(task)
+                            task_to_index[task] = (i, j)
                         else:
-                            rollout_sync_rewards.append(rwd(rollout))
-                    rollout["_sync_rewards"] = rollout_sync_rewards
-                    rollout["_async_tasks"] = rollout_tasks
+                            val = rwd(rollout)
+                            sync_results.append((j, val))
+                    rollout["_sync_results"] = sync_results
+                    rollout["_async_tags"] = async_tasks
                     rollout_data.append(rollout)
 
-                async_results = []
-                if all_async_tasks:
-                    async_results = await asyncio.gather(*all_async_tasks, return_exceptions=True)
-                task_results = dict(zip(all_async_tasks, async_results))
+                async_vals = []
+                if all_tasks:
+                    async_vals = await asyncio.gather(*all_tasks, return_exceptions=True)
 
-                rewards_accum = []
+                # Fill reward_values tensor
+                for i_idx, rollout in enumerate(rollout_data):
+                    for j, val in rollout["_sync_results"]:
+                        reward_values[j, i_idx] = float(val)
+
+                for task, res in zip(all_tasks, async_vals):
+                    i, j = task_to_index[task]
+                    if isinstance(res, Exception):
+                        print(f"[Warning] Async reward failed: {res}")
+                        res = 0.0
+                    reward_values[j, i] = float(res)
+
+                # Build rollouts + total rewards list
+                rewards_total = []
                 for i, rollout in enumerate(rollout_data):
-                    total_reward = sum(rollout["_sync_rewards"])
-                    for task in rollout["_async_tasks"]:
-                        res = task_results.get(task, 0.0)
-                        if isinstance(res, Exception):
-                            print(f"[Warning] Async reward failed: {res}")
-                            res = 0.0
-                        total_reward += res
-                    # Cleanup
-                    rollout.pop("_sync_rewards", None)
-                    rollout.pop("_async_tasks", None)
-                    rollout["total_reward"] = total_reward
-                    rollout["logprob_sum"] = logprob_sums[i].item()
+                    total_r = reward_values[:, i].sum().item()
+                    rollout.pop("_sync_results", None)
+                    rollout.pop("_async_tags", None)
+                    rollout["total_reward"] = total_r
+                    rollout["logprob_sum"] = logprob_total[i].item()
                     rollouts.append(rollout)
-                    rewards_accum.append(total_reward)
-                return rewards_accum
+                    rewards_total.append(total_r)
 
-            rewards = asyncio.run(_compute_async())
-        else:
+                return rewards_total
+
+            rewards_list = asyncio.run(_async_eval())
+
+        else:  # synchronous evaluation
+            rewards_list: List[float] = []
             for i, p in enumerate(prompts):
                 response_text = self.tokenizer.decode(
                     sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True
                 )
                 rollout = dict(p)
                 rollout["response"] = response_text
-                total_reward = 0.0
-                for rwd in self.rewards:
-                    total_reward += rwd(rollout)
-                rollout["total_reward"] = total_reward
-                rollout["logprob_sum"] = logprob_sums[i].item()
-                rollouts.append(rollout)
-                rewards.append(total_reward)
 
-        rewards_t = torch.tensor(rewards, device=sequences.device, dtype=torch.float32)
+                total_reward = 0.0
+                for j, rwd in enumerate(self.rewards):
+                    val = float(rwd(rollout))
+                    reward_values[j, i] = val
+                    total_reward += val
+
+                rollout["total_reward"] = total_reward
+                rollout["logprob_sum"] = logprob_total[i].item()
+                rollouts.append(rollout)
+                rewards_list.append(total_reward)
+
+        # ------------------------------------------------------------------
+        # Compute loss -------------------------------------------------------
+        # ------------------------------------------------------------------
+        rewards_t = torch.tensor(rewards_list, device=sequences.device, dtype=torch.float32)
         baseline = rewards_t.mean()
-        reinforce_loss = -(rewards_t - baseline) * logprob_sums
-        loss = reinforce_loss.mean()
+
+        loss_vec = torch.zeros_like(rewards_t)
+
+        for j in range(num_rewards):
+            r_vals = reward_values[j]
+            apply_flag = self.rewards_apply_flags[j]
+            if apply_flag:
+                logp_seg = logprob_total
+            else:
+                logp_seg = logprob_output
+            loss_vec += -(r_vals - baseline) * logp_seg
+
+        loss = loss_vec.mean()
         return rewards_t, rollouts, loss
 
     def _backprop(self, loss, final_batch: bool = False) -> bool:
@@ -481,10 +621,17 @@ class ReinforceTrainer:
                         global_batch_size = int(bs_tensor.item())
 
                     sequences = self._generate_sequences(batch.inputs, gen_kwargs)
-                    logprob_sums = self._compute_logprobs(sequences, batch.inputs)
+                    logprob_total, logprob_thinking, logprob_output = self._compute_logprobs(
+                        sequences, batch.inputs
+                    )
 
                     rewards_t, rollouts, loss = self._compute_rewards(
-                        batch.prompts, sequences, batch.inputs, logprob_sums
+                        batch.prompts,
+                        sequences,
+                        batch.inputs,
+                        logprob_total,
+                        logprob_thinking,
+                        logprob_output,
                     )
 
                     # Gradient accumulation / optimiser step
