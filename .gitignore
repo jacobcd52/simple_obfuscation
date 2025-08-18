@@ -178,7 +178,6 @@ cython_debug/
 *.ckpt
 *.safetensors
 checkpoints/
-models/
 weights/
 
 # Data files
