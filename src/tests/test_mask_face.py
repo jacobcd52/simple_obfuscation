@@ -9,7 +9,7 @@ def mask_face_small():
     """Load very small GPT2 models for quick testing purposes."""
     # We purposefully use the same tiny model for both mask & face so the
     # vocabulary is guaranteed to match while keeping resource usage low.
-    model_name = "sshleifer/tiny-gpt2"
+    model_name = "Qwen/Qwen3-4B"
     return MaskFace(
         mask_model_name=model_name,
         face_model_name=model_name,

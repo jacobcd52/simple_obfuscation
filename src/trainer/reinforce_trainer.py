@@ -379,6 +379,11 @@ class ReinforceTrainer:
             logprob_thinking[b] = (token_logprobs[b] * think_mask_row.float()).sum()
             logprob_output[b] = (token_logprobs[b] * output_mask_row.float()).sum()
 
+            think_tokens = input_ids_full[b, think_mask_row]
+            output_tokens = input_ids_full[b, output_mask_row]
+            print(f"think_tokens: {self.tokenizer.decode(think_tokens)}")
+            print(f"output_tokens: {self.tokenizer.decode(output_tokens)}")
+
         logprob_total = logprob_thinking + logprob_output
         return logprob_total, logprob_thinking, logprob_output
 
