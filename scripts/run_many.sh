@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# Ignore SIGHUP so that child processes (e.g. torchrun workers) aren’t terminated when
+# the controlling terminal closes. This prevents the SignalException (signal 1) seen
+# when running under nohup.
+trap '' HUP
 
 if [ "$#" -ne 2 ]; then
   echo "Usage: bash $(basename "$0") CONFIG_NAME NUM_RUNS" >&2
@@ -92,9 +96,9 @@ fi
 for ((i=1; i<=NUM_RUNS; i++)); do
   if [ "$USE_TORCHRUN" = true ]; then
     echo "Starting distributed run ${i}/${NUM_RUNS} | config='${CONFIG_NAME}' | multi_gpu='${MULTI_GPU}' | GPUs=${NPROC}"
-    "${LAUNCHER[@]}" --nproc-per-node "$NPROC" "$REPO_ROOT/scripts/train.py" --config "$CONFIG_NAME"
+    "${LAUNCHER[@]}" --nproc-per-node "$NPROC" "$REPO_ROOT/scripts/train.py" --config "$CONFIG_NAME" || { echo "[run_many] Run ${i}/${NUM_RUNS} failed with exit code $? – skipping."; continue; }
   else
     echo "Starting single-process run ${i}/${NUM_RUNS} | config='${CONFIG_NAME}' | multi_gpu='none'"
-    "$PY" "$REPO_ROOT/scripts/train.py" --config "$CONFIG_NAME"
+    "$PY" "$REPO_ROOT/scripts/train.py" --config "$CONFIG_NAME" || { echo "[run_many] Run ${i}/${NUM_RUNS} failed with exit code $? – skipping."; continue; }
   fi
 done

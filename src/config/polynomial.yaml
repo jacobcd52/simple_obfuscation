@@ -4,7 +4,7 @@ model_name: "Qwen/Qwen3-14B"
 
 batch_size: 3
 grad_accum_steps: 2
-num_episodes: 500
+num_episodes: 1600
 learning_rate: 1e-5
 thinking_max_tokens: 800
 output_max_tokens: 1000
@@ -12,7 +12,7 @@ multi_gpu: "fsdp"
 
 save_rollouts_to_wandb: true
 wandb_project: "poly_1"
-wandb_run_name: "penalty 14B"
+wandb_run_name: "no penalty 14B"
 
 
 # Prompt builder – use the built-in MMLU dataset.
@@ -34,6 +34,6 @@ rewards:
     
   - cls: "expanded_polynomial"
     params:
-      coefficient: -1.0
+      coefficient: 0.0
       log_thinking: true
 
