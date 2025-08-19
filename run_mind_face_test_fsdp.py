@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""Standalone *MaskFace* test that runs the models under PyTorch FSDP.
+"""Standalone *MindFace* test that runs the models under PyTorch FSDP.
 
 Launch with *torchrun* (recommended):
 
-    torchrun --standalone --nproc_per_node=1 run_mask_face_test_fsdp.py
+    torchrun --standalone --nproc_per_node=1 run_mind_face_test_fsdp.py
 
-The script mirrors *run_mask_face_test.py* but:
-1. Explicitly loads the mask and face models.
+The script mirrors *run_mind_face_test.py* but:
+1. Explicitly loads the mind and face models.
 2. Wraps them with :class:`torch.distributed.fsdp.FullyShardedDataParallel`.
-3. Passes the wrapped models (and shared tokenizer) to :class:`MaskFace`.
+3. Passes the wrapped models (and shared tokenizer) to :class:`MindFace`.
 4. Generates a couple of answers and prints the built-in vs. manually decoded
-   mask/face generations, asserting they match.
+   mind/face generations, asserting they match.
 
 Note: For a single-GPU run, a dummy process group is still initialised so FSDP
 can function. On CPU-only environments we fall back to plain (unsharded)
@@ -29,7 +29,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.models.mask_face import MaskFace
+from src.models.mind_face import MindFace
 
 
 def setup_distributed(device: torch.device) -> None:  # noqa: D401 – helper
@@ -84,9 +84,9 @@ def main() -> None:  # noqa: D401 – simple script
         face_model = face_model.to(device)
 
     # ------------------------------------------------------------------
-    # Build MaskFace wrapper using the pre-loaded components
+    # Build MindFace wrapper using the pre-loaded components
     # ------------------------------------------------------------------
-    mask_face = MaskFace(
+    mind_face = MindFace(
         mask_model=mask_model,
         face_model=face_model,
         tokenizer=tokenizer,
@@ -107,7 +107,7 @@ def main() -> None:  # noqa: D401 – simple script
     # ------------------------------------------------------------------
     # Run generation
     # ------------------------------------------------------------------
-    out = mask_face.generate(
+    out = mind_face.generate(
         prompt_inputs=prompts,
         max_thinking_tokens=4,
         max_new_tokens=8,
@@ -115,7 +115,7 @@ def main() -> None:  # noqa: D401 – simple script
 
     print("\n=== Built-in decoding (FSDP) ===")
     for i, (m, f) in enumerate(zip(out.mask_generations, out.face_generations)):
-        print(f"[Sample {i}] MASK : {m}")
+        print(f"[Sample {i}] MIND : {m}")
         print(f"[Sample {i}] FACE : {f}\n")
 
     # ------------------------------------------------------------------
@@ -135,14 +135,14 @@ def main() -> None:  # noqa: D401 – simple script
         think_slice = out.think_mask[i, start_idx : start_idx + gen_tokens.size(0)]
         face_slice = out.face_mask[i, start_idx : start_idx + gen_tokens.size(0)]
 
-        manual_mask = tok.decode(gen_tokens[think_slice].tolist(), skip_special_tokens=True).strip()
+        manual_mind = tok.decode(gen_tokens[think_slice].tolist(), skip_special_tokens=True).strip()
         manual_face = tok.decode(gen_tokens[face_slice].tolist(), skip_special_tokens=True).strip()
 
-        print(f"[Sample {i}] MANUAL MASK : {manual_mask}")
+        print(f"[Sample {i}] MANUAL MIND : {manual_mind}")
         print(f"[Sample {i}] MANUAL FACE : {manual_face}\n")
 
         # Consistency checks
-        assert manual_mask == out.mask_generations[i], "Mismatch in mask decoding"
+        assert manual_mind == out.mask_generations[i], "Mismatch in mind decoding"
         assert manual_face == out.face_generations[i], "Mismatch in face decoding"
 
     print("All manual decodings match the built-in results! ✅")

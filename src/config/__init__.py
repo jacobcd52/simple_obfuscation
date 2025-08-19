@@ -77,13 +77,13 @@ class TrainConfig:
     multi_gpu: str = "none"  # "none" | "ddp" | "fsdp"
 
     # ------------------------------------------------------------------
-    # mask / face dual-model training
+    # mind / face dual-model training
     # ------------------------------------------------------------------
-    # When True, *ReinforceTrainer* will load the *MaskFace* wrapper (see
-    # ``src.models.mask_face``) instead of a single language model.  Both the
+    # When True, *ReinforceTrainer* will load the *MindFace* wrapper (see
+    # ``src.models.mind_face``) instead of a single language model.  Both the
     # mask and the face sub-models are included in the optimiser so their
     # parameters are updated jointly.
-    use_mask_face: bool = False
+    use_mind_face: bool = False
     # Optional override names for the sub-models.  When *None*, we fall back
     # to *model_name*.
     mask_model_name: Optional[str] = None

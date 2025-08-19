@@ -3,8 +3,8 @@
 from importlib import import_module
 
 __all__ = [
-    "MaskFace",
+    "MindFace",
 ]
 
 # Re-export for convenience
-MaskFace = import_module("src.models.mask_face").MaskFace
+MindFace = import_module("src.models.mind_face").MindFace

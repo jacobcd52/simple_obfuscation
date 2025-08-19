@@ -13,7 +13,7 @@ from transformers import (
 
 from ..utils.logit_processors import BatchThinkingTokenBudgetProcessor
 
-__all__ = ["MaskFace", "GenerationOutput"]
+__all__ = ["MindFace", "GenerationOutput"]
 
 
 class GenerationOutput:
@@ -29,10 +29,10 @@ class GenerationOutput:
             setattr(self, k, v)
 
 
-class MaskFace(nn.Module):
-    """Wrapper around two language models implementing the *mask-face* pattern.
+class MindFace(nn.Module):
+    """Wrapper around two language models implementing the *mind-face* pattern.
 
-    The *mask* model (analogue of the original *shoggoth*) is responsible for
+    The *mind* model (analogue of the original *shoggoth*) is responsible for
     generating the hidden chain-of-thought (CoT) enclosed between ``<think>``
     and ``</think>``.  The *face* model produces the final visible answer.
 
@@ -50,12 +50,12 @@ class MaskFace(nn.Module):
         Expected batch size at generation time.  Required by
         :class:`BatchThinkingTokenBudgetProcessor`.
     max_thinking_tokens : int, optional
-        Budget for the number of tokens the *mask* model may generate.  Must be
+        Budget for the number of tokens the *mind* model may generate.  Must be
         supplied unless a custom *logits_processor* is given.
     min_thinking_tokens : int, optional
         Minimum number of thinking tokens.
     logit_processor : *LogitsProcessor* or *list*, optional
-        Custom logits processor(s) applied during the *mask* generation phase.
+        Custom logits processor(s) applied during the *mind* generation phase.
         When *None*, a *BatchThinkingTokenBudgetProcessor* is instantiated with
         the supplied token budgets.
     """
@@ -91,6 +91,7 @@ class MaskFace(nn.Module):
                     "When pre-loaded models are not provided, 'mask_model_name' and "
                     "'face_model_name' must be specified."
                 )
+
             # Small helper to keep the logic symmetric
             def _load(model_name: str):
                 dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
@@ -105,7 +106,7 @@ class MaskFace(nn.Module):
             self.tokenizer = AutoTokenizer.from_pretrained(face_model_name, padding_side="left", use_fast=True)
             mask_tok = AutoTokenizer.from_pretrained(mask_model_name, padding_side="left", use_fast=True)
             if self.tokenizer.get_vocab() != mask_tok.get_vocab():
-                raise ValueError("Tokenizers of face and mask models differ – they must share the same vocabulary")
+                raise ValueError("Tokenizers of face and mind models differ – they must share the same vocabulary")
 
         # ------------------------------------------------------------------
         # Build logits processor for the thinking phase
@@ -141,18 +142,18 @@ class MaskFace(nn.Module):
         max_new_tokens: int,
         **gen_kwargs,
     ) -> GenerationOutput:
-        """Generate answers following the *mask-face* protocol.
+        """Generate answers following the *mind-face* protocol.
 
         The API purposefully differs from HuggingFace's *generate* to better fit
         the two-stage procedure.  *ReinforceTrainer* handles this discrepancy.
         """
         # --------------------------------------------------------------
-        # Stage 1 – MASK (chain-of-thought)
+        # Stage 1 – MIND (chain-of-thought)
         # --------------------------------------------------------------
         model_inputs = self.tokenizer(prompt_inputs, return_tensors="pt", padding=True).to(self.device)
         prompt_lens = (model_inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
 
-        # Generate hidden CoT via the *mask* model using the supplied logits processor
+        # Generate hidden CoT via the *mind* model using the supplied logits processor
         mask_out = self.mask_model.generate(
             **model_inputs,
             max_new_tokens=max_thinking_tokens,

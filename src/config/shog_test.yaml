@@ -1,0 +1,41 @@
+# Run python scripts/train.py --config mmlu.yaml
+
+model_name: "Qwen/Qwen3-4B"
+
+batch_size: 1
+grad_accum_steps: 2
+num_episodes: 1600
+learning_rate: 1e-5
+thinking_max_tokens: 800
+output_max_tokens: 1000
+multi_gpu: "fsdp"
+use_mind_face: true
+
+save_rollouts_to_wandb: true
+wandb_project: "poly_1"
+wandb_run_name: "shog_test"
+
+
+# Prompt builder – use the built-in MMLU dataset.
+prompt_builder_cls: "src.prompt_builders.polynomial.PolynomialDerivativePromptBuilder"
+prompt_builder_params:
+  min_degree: 4
+  max_degree: 8
+  k_min: 1
+  k_max: 1
+  root_range: 6
+  coef_range: 3
+  multiplicity_max: 3
+  num_nonzero_roots: 2  
+
+rewards:
+  - cls: "factored_polynomial"
+    params:
+      coefficient: 1.0
+    
+  - cls: "expanded_polynomial"
+    params:
+      coefficient: 0.0
+      log_thinking: true
+      apply_to_thinking: false
+

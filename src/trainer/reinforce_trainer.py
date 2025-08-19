@@ -106,15 +106,15 @@ class ReinforceTrainer:
             raise ValueError(f"Unknown multi_gpu setting: {cfg.multi_gpu}")
 
         # ------------------------------------------------------------------
-        # model / tokenizer (with optional MaskFace wrapper)
+        # model / tokenizer (with optional MindFace wrapper)
         # ------------------------------------------------------------------
-        if getattr(cfg, "use_mask_face", False):
-            from ..models.mask_face import MaskFace
+        if getattr(cfg, "use_mind_face", False):
+            from ..models.mind_face import MindFace
 
             mask_name = cfg.mask_model_name or cfg.model_name
             face_name = cfg.face_model_name or cfg.model_name
 
-            self.model = MaskFace(
+            self.model = MindFace(
                 mask_model_name=mask_name,
                 face_model_name=face_name,
                 device="cuda" if torch.cuda.is_available() else "cpu",
@@ -165,12 +165,29 @@ class ReinforceTrainer:
 
         for rw in cfg.rewards:
             apply_flag = getattr(rw, "apply_to_thinking", True)
+
+            # Filter out parameters not accepted by the reward's __init__ (e.g., 'apply_to_thinking')
+            raw_params = dict(getattr(rw, "params", {}))
+            if "apply_to_thinking" in raw_params:
+                raw_params.pop("apply_to_thinking")
+
+            def _filter_kwargs_for(cls_obj, kwargs_dict):
+                sig = inspect.signature(cls_obj.__init__)
+                return {k: v for k, v in kwargs_dict.items() if k in sig.parameters}
+
             if "." in rw.cls:
-                inst = _instantiate_class(rw.cls, **rw.params)
-                _append_reward(inst, apply_flag)
+                # Fully qualified path – import class to check signature before instantiation
+                *mod_parts, class_name = rw.cls.split(".")
+                mod = __import__(".".join(mod_parts), fromlist=[class_name])
+                cls_obj = getattr(mod, class_name)
+                filtered_params = _filter_kwargs_for(cls_obj, raw_params)
+                inst = cls_obj(**filtered_params)
             else:
-                cls = get_reward_class(rw.cls)
-                _append_reward(cls(**rw.params), apply_flag)
+                cls_obj = get_reward_class(rw.cls)
+                filtered_params = _filter_kwargs_for(cls_obj, raw_params)
+                inst = cls_obj(**filtered_params)
+
+            _append_reward(inst, apply_flag)
 
         self.rollout_store = RolloutStore("rollouts")
 
@@ -282,7 +299,7 @@ class ReinforceTrainer:
 
         inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
 
-        # Store raw prompt texts for potential MaskFace generation.  We make a
+        # Store raw prompt texts for potential MindFace generation.  We make a
         # *shallow* copy to avoid side-effects when the dict is later passed
         # into HF generate (the extra key is removed beforehand).
         inputs_with_texts = {k: v for k, v in inputs.items()}
@@ -290,11 +307,11 @@ class ReinforceTrainer:
         return Batch(prompts, prompt_texts, inputs_with_texts), prompt_iter
 
     def _generate_sequences(self, inputs, gen_kwargs):
-        """Run `model.generate` taking MaskFace wrapper into account."""
-        # When using MaskFace we call its specialised `generate` API.
-        from ..models.mask_face import MaskFace  # local import to avoid hard dep when unused
+        """Run `model.generate` taking MindFace wrapper into account."""
+        # When using MindFace we call its specialised `generate` API.
+        from ..models.mind_face import MindFace  # local import to avoid hard dep when unused
 
-        if isinstance(self.model, MaskFace):
+        if isinstance(self.model, MindFace):
             # inputs are not required – we rely on prompt texts instead.
             # We expect that `inputs` contains *prompt_texts* provided under a
             # special key injected by `_next_batch`.
@@ -302,7 +319,12 @@ class ReinforceTrainer:
             max_think = self.cfg.thinking_max_tokens or 0
             max_new = self.cfg.output_max_tokens or 512
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                safe_kwargs = {k: v for k, v in gen_kwargs.items() if k != "logits_processor"}
+                # Exclude keys that are explicitly passed below to avoid duplicate arguments
+                safe_kwargs = {
+                    k: v
+                    for k, v in gen_kwargs.items()
+                    if k not in ("logits_processor", "max_new_tokens", "output_scores", "return_dict_in_generate")
+                }
                 generated = self.model.generate(
                     prompt_inputs=prompt_texts,
                     max_thinking_tokens=max_think,
@@ -381,8 +403,6 @@ class ReinforceTrainer:
 
             think_tokens = input_ids_full[b, think_mask_row]
             output_tokens = input_ids_full[b, output_mask_row]
-            print(f"think_tokens: {self.tokenizer.decode(think_tokens)}")
-            print(f"output_tokens: {self.tokenizer.decode(output_tokens)}")
 
         logprob_total = logprob_thinking + logprob_output
         return logprob_total, logprob_thinking, logprob_output

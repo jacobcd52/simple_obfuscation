@@ -1,16 +1,16 @@
 import pytest
 import torch
 
-from src.models.mask_face import MaskFace
+from src.models.mind_face import MindFace
 
 
 @pytest.fixture(scope="module")
-def mask_face_small():
+def mind_face_small():
     """Load very small GPT2 models for quick testing purposes."""
-    # We purposefully use the same tiny model for both mask & face so the
+    # We purposefully use the same tiny model for both mind & face so the
     # vocabulary is guaranteed to match while keeping resource usage low.
     model_name = "Qwen/Qwen3-4B"
-    return MaskFace(
+    return MindFace(
         mask_model_name=model_name,
         face_model_name=model_name,
         batch_size=2,
@@ -19,12 +19,12 @@ def mask_face_small():
     )
 
 
-def test_generation_shapes(mask_face_small):
+def test_generation_shapes(mind_face_small):
     prompts = [
         "<user>Hello, how are you?",
         "<user>What is the capital of France?",
     ]
-    out = mask_face_small.generate(
+    out = mind_face_small.generate(
         prompt_inputs=prompts,
         max_thinking_tokens=4,
         max_new_tokens=8,
@@ -56,9 +56,9 @@ def test_generation_shapes(mask_face_small):
     ) <= gen_token_count, "Masks cover more tokens than generated"
 
 
-def test_decoded_generations(mask_face_small):
+def test_decoded_generations(mind_face_small):
     prompts = ["<user>Tell me a joke."]
-    out = mask_face_small.generate(
+    out = mind_face_small.generate(
         prompt_inputs=prompts,
         max_thinking_tokens=4,
         max_new_tokens=8,
