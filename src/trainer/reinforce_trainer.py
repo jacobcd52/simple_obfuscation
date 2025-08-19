@@ -509,24 +509,23 @@ class ReinforceTrainer:
         # ------------------------------------------------------------------
         # Compute loss -------------------------------------------------------
         # ------------------------------------------------------------------
-        rewards_t = torch.tensor(rewards_list, device=sequences.device, dtype=torch.float32)
-        baseline = rewards_t.mean()
+        num_rewards = reward_values.size(0)
 
+        rewards_t = torch.tensor(rewards_list, device=sequences.device, dtype=torch.float32)
+
+        # Per-reward baseline → advantage
+        baseline_per_reward = reward_values.mean(dim=1, keepdim=True)  # (R,1)
+        advantages = reward_values - baseline_per_reward  # (R,B)
+
+        # Select log-prob segment per reward based on apply_to_thinking flag
         apply_flags = torch.tensor(self.rewards_apply_flags, device=sequences.device, dtype=torch.bool)
 
-        if apply_flags.any():
-            rewards_apply_true = reward_values[apply_flags].sum(dim=0)
-        else:
-            rewards_apply_true = torch.zeros_like(rewards_t)
+        logp_total_mat = logprob_total.unsqueeze(0).expand(num_rewards, -1)
+        logp_output_mat = logprob_output.unsqueeze(0).expand(num_rewards, -1)
+        logp_seg = torch.where(apply_flags.unsqueeze(1), logp_total_mat, logp_output_mat)
 
-        if (~apply_flags).any():
-            rewards_apply_false = reward_values[~apply_flags].sum(dim=0)
-        else:
-            rewards_apply_false = torch.zeros_like(rewards_t)
-
-        loss_vec = -((rewards_apply_true - baseline) * logprob_total + (rewards_apply_false - baseline) * logprob_output)
-
-        loss = loss_vec.mean()
+        loss_mat = -(advantages * logp_seg)  # (R,B)
+        loss = loss_mat.mean()
         return rewards_t, rollouts, loss
 
     def _backprop(self, loss, final_batch: bool = False) -> bool:
