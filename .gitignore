@@ -187,7 +187,6 @@ weights/
 *.hdf5
 *.pkl
 *.pickle
-data/
 datasets/
 raw_data/
 processed_data/

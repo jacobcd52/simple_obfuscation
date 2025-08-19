@@ -23,11 +23,9 @@ rewards:
       coefficient: 1.0
       log_thinking: false
 
-  - cls: "judge_tag_reward"
+  - cls: "judge_reward"
     params:
       model: "gpt-4.1"
       coefficient: -0.5
       log_thinking: true
       judge_prompt_template: "hard_math"
-      budget_tokens: 64
-
