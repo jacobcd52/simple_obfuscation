@@ -363,8 +363,10 @@ class ReinforceTrainer:
         # Mask newly generated tokens (positions >= prompt length per-sample)
         seq_len = sequences.shape[1]
         arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
+        # Common padded prompt length – reproduces original behaviour
+        prompt_len_common = inputs["input_ids"].shape[1]
         prompt_lens = (inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
-        mask_full = arange_seq.expand(sequences.size(0), -1) >= prompt_lens.unsqueeze(1)
+        mask_full = arange_seq.expand(sequences.size(0), -1) >= prompt_len_common
         mask = mask_full[:, 1:]  # align with targets
         selected_logprobs = token_logprobs * mask.float()
 
@@ -374,7 +376,6 @@ class ReinforceTrainer:
         end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
 
         B, Lm1 = selected_logprobs.shape  # seq_len-1
-        indices = torch.arange(sequences.shape[1], device=sequences.device)
 
         logprob_thinking = torch.zeros(B, device=sequences.device)
         logprob_output = torch.zeros(B, device=sequences.device)
@@ -400,9 +401,6 @@ class ReinforceTrainer:
 
             logprob_thinking[b] = (token_logprobs[b] * think_mask_row.float()).sum()
             logprob_output[b] = (token_logprobs[b] * output_mask_row.float()).sum()
-
-            think_tokens = input_ids_full[b, think_mask_row]
-            output_tokens = input_ids_full[b, output_mask_row]
 
         logprob_total = logprob_thinking + logprob_output
         return logprob_total, logprob_thinking, logprob_output
@@ -514,16 +512,19 @@ class ReinforceTrainer:
         rewards_t = torch.tensor(rewards_list, device=sequences.device, dtype=torch.float32)
         baseline = rewards_t.mean()
 
-        loss_vec = torch.zeros_like(rewards_t)
+        apply_flags = torch.tensor(self.rewards_apply_flags, device=sequences.device, dtype=torch.bool)
 
-        for j in range(num_rewards):
-            r_vals = reward_values[j]
-            apply_flag = self.rewards_apply_flags[j]
-            if apply_flag:
-                logp_seg = logprob_total
-            else:
-                logp_seg = logprob_output
-            loss_vec += -(r_vals - baseline) * logp_seg
+        if apply_flags.any():
+            rewards_apply_true = reward_values[apply_flags].sum(dim=0)
+        else:
+            rewards_apply_true = torch.zeros_like(rewards_t)
+
+        if (~apply_flags).any():
+            rewards_apply_false = reward_values[~apply_flags].sum(dim=0)
+        else:
+            rewards_apply_false = torch.zeros_like(rewards_t)
+
+        loss_vec = -((rewards_apply_true - baseline) * logprob_total + (rewards_apply_false - baseline) * logprob_output)
 
         loss = loss_vec.mean()
         return rewards_t, rollouts, loss
