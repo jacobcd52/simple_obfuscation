@@ -309,9 +309,15 @@ class ReinforceTrainer:
     def _generate_sequences(self, inputs, gen_kwargs):
         """Run `model.generate` taking MindFace wrapper into account."""
         # When using MindFace we call its specialised `generate` API.
-        from ..models.mind_face import MindFace  # local import to avoid hard dep when unused
+        from ..models.mind_face import MindFace  # local import
 
-        if isinstance(self.model, MindFace):
+        # Handle potential wrapping by Accelerate/torch.distributed – the actual
+        # MindFace instance can be at self.model or self.model.module.
+        model_for_check = self.model
+        if not isinstance(model_for_check, MindFace) and hasattr(model_for_check, "module"):
+            model_for_check = model_for_check.module  # type: ignore[attr-defined]
+
+        if isinstance(model_for_check, MindFace):
             # inputs are not required – we rely on prompt texts instead.
             # We expect that `inputs` contains *prompt_texts* provided under a
             # special key injected by `_next_batch`.
@@ -325,7 +331,7 @@ class ReinforceTrainer:
                     for k, v in gen_kwargs.items()
                     if k not in ("logits_processor", "max_new_tokens", "output_scores", "return_dict_in_generate")
                 }
-                generated = self.model.generate(
+                generated = model_for_check.generate(
                     prompt_inputs=prompt_texts,
                     max_thinking_tokens=max_think,
                     max_new_tokens=max_new,
