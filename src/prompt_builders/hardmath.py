@@ -9,7 +9,10 @@ the correct integer answer.
 from __future__ import annotations
 
 import random
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Set
+import json
+from pathlib import Path
+import re
 
 from datasets import load_dataset
 
@@ -69,89 +72,99 @@ def _load_daft_math(hf_name: str, split: str) -> List[Dict]:
 
 
 def _equivalent_expression_for_integer(n: int, rng: random.Random | None = None) -> str:
-	"""Return a non-trivial arithmetic expression string that equals ``n``.
+	"""Return a numeric-only arithmetic expression string that equals ``n``.
 
-	Identities intentionally include divisions and exponents to increase
-	apparent difficulty while remaining exactly equal to ``n`` for all integers.
+	To avoid trivially revealing the answer inside the expression, we first
+	compute a hidden affine transform ``T = A*n + B`` (pure numbers) and then
+	recover ``n`` from ``T`` using algebraic identities that evaluate exactly to
+	``T``. This ensures the expression contains no literal occurrence of ``n`` or
+	its digits while remaining exactly equal to ``n``.
 	"""
 	rng = rng or random
-	choice = rng.randint(0, 9)
+
+	# Build a hidden numeric value T = A*n + B to reconstruct later
+	A = rng.randint(11, 97)
+	B = rng.randint(10000, 99999)
+	T = A * n + B
+
+	choice = rng.randint(0, 7)
 	if choice == 0:
+		# Single difference-of-squares recovers T, then undo the affine transform
 		k = rng.randint(2, 9)
-		return f"((({n}+{k})^2 - ({n}-{k})^2) / (4*{k}))"
+		expr_T = f"((({T}+{k})^2 - ({T}-{k})^2) / (4*{k}))"
+		return f"(({expr_T} - {B}) / {A})"
 	elif choice == 1:
-		k = rng.randint(2, 7)
-		m = rng.randint(2, 7)
-		while m == k:
-			m = rng.randint(2, 7)
-		r = rng.randint(2, 7)
-		while r == k or r == m:
-			r = rng.randint(2, 7)
-		return (
-			f"((({n}+{k})^2 - ({n}-{k})^2)/(4*{k}) + "
-			f"(({n}+{m})^2 - ({n}-{m})^2)/(4*{m}) - "
-			f"(({n}+{r})^2 - ({n}-{r})^2)/(4*{r}))"
-		)
-	elif choice == 2:
-		# Multiply by a constant-only identity that equals 1 using cubes formula
-		a = rng.randint(2, 6)
-		b = rng.randint(2, 6)
-		while b == a:
-			b = rng.randint(2, 6)
-		ones = f"(({a}^3 - {b}^3) / (({a}-{b}) * ({a}^2 + {a}*{b} + {b}^2)))"
-		A = f"((({n}+{a})^2 - ({n}-{a})^2) / (4*{a}))"
-		return f"({A} * {ones})"
-	elif choice == 3:
-		u = rng.randint(2, 6)
-		v = rng.randint(2, 6)
-		w = rng.randint(2, 6)
-		x = rng.randint(2, 6)
-		return (
-			f"(({n} * ({u}^2 + {v}^2) + ({w}^3 - {x}^2)) - "
-			f"(({w}^3 - {x}^2) + (({u}^2 + {v}^2) - 1) * {n}))"
-		)
-	elif choice == 4:
-		c = rng.randint(2, 5)
+		# Scaled variant: recover T via scaled DoS identity
+		u = rng.randint(2, 7)
 		a = rng.randint(2, 9)
-		return f"((({c}*{n}+{a})^2 - ({c}*{n}-{a})^2) / (4*{c}*{a}))"
-	elif choice == 5:
-		a = rng.randint(2, 6)
-		b = rng.randint(2, 6)
-		while b == a:
-			b = rng.randint(2, 6)
-		c = rng.randint(2, 6)
-		while c == a or c == b:
-			c = rng.randint(2, 6)
-		return (
-			f"((({n}+{a})^2 - ({n}-{a})^2)/(4*{a}) + "
-			f"(({n}+{b})^2 - ({n}-{b})^2)/(4*{b}) - "
-			f"(({n}+{c})^2 - ({n}-{c})^2)/(4*{c}))"
-		)
-	elif choice == 6:
-		# Multiply by a constant-only identity that equals 1 using fourth powers
+		expr_T = f"((({u}*{T}+{a})^2 - ({u}*{T}-{a})^2) / (4*{u}*{a}))"
+		return f"(({expr_T} - {B}) / {A})"
+	elif choice == 2:
+		# Multiply-by-one via cubes identity wrapped around a DoS recovery of T
+		p = rng.randint(2, 6)
+		q = rng.randint(2, 6)
+		while q == p:
+			q = rng.randint(2, 6)
+		one3 = f"(({p}^3 - {q}^3) / (({p}-{q}) * ({p}^2 + {p}*{q} + {q}^2)))"
+		k = rng.randint(2, 9)
+		base = f"((({T}+{k})^2 - ({T}-{k})^2) / (4*{k}))"
+		expr_T = f"({base} * {one3})"
+		return f"(({expr_T} - {B}) / {A})"
+	elif choice == 3:
+		# Multiply-by-one via fourth-power identity wrapped around a DoS of T
 		p = rng.randint(2, 6)
 		q = rng.randint(2, 6)
 		while q == p:
 			q = rng.randint(2, 6)
 		one4 = f"(({p}^4 - {q}^4) / (({p}^2 - {q}^2) * ({p}^2 + {q}^2)))"
-		A = f"((({n}+{p})^2 - ({n}-{p})^2) / (4*{p}))"
-		return f"({A} * {one4})"
-	else:
-		# Weighted combination with constant multipliers summing to 1
+		k = rng.randint(2, 9)
+		base = f"((({T}+{k})^2 - ({T}-{k})^2) / (4*{k}))"
+		expr_T = f"({base} * {one4})"
+		return f"(({expr_T} - {B}) / {A})"
+	elif choice == 4:
+		# Weighted combination of three ways to recover T where weights sum to 1
 		p = rng.randint(2, 9)
 		q = rng.randint(2, 9)
 		r = p + q - 1
-		a = rng.randint(2, 6)
-		b = rng.randint(2, 6)
-		c = rng.randint(2, 6)
-		while b == a:
-			b = rng.randint(2, 6)
-		while c == a or c == b:
-			c = rng.randint(2, 6)
-		A = f"((({n}+{a})^2 - ({n}-{a})^2) / (4*{a}))"
-		B = f"((({n}+{b})^2 - ({n}-{b})^2) / (4*{b}))"
-		C = f"((({n}+{c})^2 - ({n}-{c})^2) / (4*{c}))"
-		return f"(({p}*{A} + {q}*{B} - {r}*{C}))"
+		k1 = rng.randint(2, 9)
+		k2 = rng.randint(2, 9)
+		while k2 == k1:
+			k2 = rng.randint(2, 9)
+		k3 = rng.randint(2, 9)
+		while k3 == k1 or k3 == k2:
+			k3 = rng.randint(2, 9)
+		A1 = f"((({T}+{k1})^2 - ({T}-{k1})^2) / (4*{k1}))"
+		A2 = f"((({T}+{k2})^2 - ({T}-{k2})^2) / (4*{k2}))"
+		A3 = f"((({T}+{k3})^2 - ({T}-{k3})^2) / (4*{k3}))"
+		expr_T = f"(({p}*{A1} + {q}*{A2} - {r}*{A3}))"
+		return f"(({expr_T} - {B}) / {A})"
+	elif choice == 5:
+		# Affine undo wrapped inside/addition of zero terms that cancel
+		u = rng.randint(2, 6)
+		v = rng.randint(2, 6)
+		w = rng.randint(2, 6)
+		x = rng.randint(2, 6)
+		noise = f"(({w}^3 - {x}^2) - ({w}^3 - {x}^2))"  # equals 0
+		k = rng.randint(2, 9)
+		base = f"((({T}+{k})^2 - ({T}-{k})^2) / (4*{k}))"
+		expr_T = f"(({u}^2+{v}^2)*{base} - (({u}^2+{v}^2)-1)*{base} + {noise})"
+		return f"(({expr_T} - {B}) / {A})"
+	elif choice == 6:
+		# Two-step DoS: recover T via a scaled inner, then an outer identity
+		u = rng.randint(2, 7)
+		a = rng.randint(2, 9)
+		inner = f"((({u}*{T}+{a})^2 - ({u}*{T}-{a})^2) / (4*{u}*{a}))"
+		k = rng.randint(2, 9)
+		outer = f"((({inner}+{k})^2 - ({inner}-{k})^2) / (4*{k}))"
+		return f"(({outer} - {B}) / {A})"
+	else:
+		# Symmetric weighted combination around T that simplifies to T
+		p = rng.randint(2, 5)
+		q = rng.randint(2, 5)
+		k = rng.randint(2, 9)
+		base = f"((({T}+{k})^2 - ({T}-{k})^2) / (4*{k}))"
+		expr_T = f"(({p}*{base} + {q}*{base} - ({p}+{q}-1)*{base}))"
+		return f"(({expr_T} - {B}) / {A})"
 
 
 class HardMathPromptBuilder(PromptBuilder):
@@ -180,6 +193,10 @@ class HardMathPromptBuilder(PromptBuilder):
 		shuffle: bool = True,
 		seed: int = 0,
 		enable_hints: bool = True,
+		# When True, derive dataset as lukemarks/daft-math-filtered-<sanitized model name>
+		use_model_filtered_dataset: bool = False,
+		model_name: str | None = None,
+		exclude_questions_path: str | None = None,
 	) -> None:
 		super().__init__()
 		self.prompt_format = prompt_format or "{question}"
@@ -187,7 +204,35 @@ class HardMathPromptBuilder(PromptBuilder):
 		random.seed(seed)
 		self.enable_hints = bool(enable_hints)
 
+		# Optional: load exclusion set from JSONL with field "question"
+		self._excluded_questions: Set[str] = set()
+		if exclude_questions_path:
+			path = Path(exclude_questions_path)
+			if path.exists():
+				with path.open() as fp:
+					for line in fp:
+						try:
+							obj = json.loads(line)
+							q = str(obj.get("question", "")).strip()
+							if q:
+								self._excluded_questions.add(q)
+						except Exception:
+							continue
+
+		# Optionally override dataset name to point to a model-filtered variant
+		if use_model_filtered_dataset:
+			if not model_name:
+				raise ValueError("model_name must be provided when use_model_filtered_dataset=True")
+			def _sanitize(name: str) -> str:
+				name = name.strip().lower()
+				name = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+				return name
+			sanitized = _sanitize(model_name)
+			hf_dataset = f"lukemarks/daft-math-filtered-{sanitized}"
+
 		self._data = _load_daft_math(hf_dataset, hf_split)
+		if self._excluded_questions:
+			self._data = [row for row in self._data if str(row.get("question", "")).strip() not in self._excluded_questions]
 		if self.shuffle:
 			random.shuffle(self._data)
 

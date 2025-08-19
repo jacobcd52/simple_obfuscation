@@ -16,6 +16,9 @@ prompt_builder_cls: "src.prompt_builders.hardmath.HardMathPromptBuilder"
 prompt_builder_params:
   hf_dataset: "metr-evals/daft-math"
   hf_split: "train"
+  enable_hints: True
+  use_model_filtered_dataset: True
+  model_name: Qwen3-4b
 
 rewards:
   - cls: "boxed_answer"

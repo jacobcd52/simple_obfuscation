@@ -29,6 +29,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Iterable, List, Dict
+from omegaconf import OmegaConf
 
 # Reuse hint generator and prefix from the prompt builder so the style matches
 try:
@@ -46,59 +47,46 @@ except Exception:
 	]
 
 
-def make_hint_config_yaml(num_episodes: int, model_name: str) -> str:
-	return "\n".join(
-		[
-			f"model_name: \"{model_name}\"",
-			"batch_size: 8",
-			"grad_accum_steps: 1",
-			f"num_episodes: {num_episodes}",
-			"learning_rate: 1e-5",
-			"thinking_max_tokens: 256",
-			"output_max_tokens: 512",
-			"multi_gpu: \"none\"",
-			"wandb_project: \"judge_sft\"",
-			"wandb_run_name: \"hinted\"",
-			"prompt_builder_cls: \"src.prompt_builders.hardmath.HardMathPromptBuilder\"",
-			"prompt_builder_params:",
-			"  hf_dataset: \"metr-evals/daft-math\"",
-			"  hf_split: \"train\"",
-			"  enable_hints: true",
-			"rewards:",
-			"  - cls: \"boxed_answer\"",
-			"    params:",
-			"      coefficient: 1.0",
-			"      log_thinking: false",
-		]
-	)
+def _resolve_base_config_path(repo_root: Path, filename: str = "hardmath.yaml") -> Path:
+	cfg_path = repo_root / "src" / "config" / filename
+	if not cfg_path.exists():
+		raise FileNotFoundError(cfg_path)
+	return cfg_path
 
 
-def make_nohint_config_yaml(num_episodes: int, model_name: str) -> str:
-	# Use the same HARDMath builder but disable hints
-	return "\n".join(
-		[
-			f"model_name: \"{model_name}\"",
-			"batch_size: 8",
-			"grad_accum_steps: 1",
-			f"num_episodes: {num_episodes}",
-			"learning_rate: 1e-5",
-			"thinking_max_tokens: 256",
-			"output_max_tokens: 512",
-			"multi_gpu: \"none\"",
-			"wandb_project: \"judge_sft\"",
-			"wandb_run_name: \"nohint\"",
-			"prompt_builder_cls: \"src.prompt_builders.hardmath.HardMathPromptBuilder\"",
-			"prompt_builder_params:",
-			"  hf_dataset: \"metr-evals/daft-math\"",
-			"  hf_split: \"train\"",
-			"  enable_hints: false",
-			"rewards:",
-			"  - cls: \"boxed_answer\"",
-			"    params:",
-			"      coefficient: 1.0",
-			"      log_thinking: false",
-		]
-	)
+def _make_config_yaml(*, enable_hints: bool, num_episodes: int, model_name: str, repo_root: Path, run_name: str) -> str:
+	base_cfg_path = _resolve_base_config_path(repo_root, "hardmath.yaml")
+	base_raw = OmegaConf.load(base_cfg_path)
+	base: Dict = OmegaConf.to_container(base_raw, resolve=True)  # type: ignore[assignment]
+
+	# Required overrides
+	base["model_name"] = model_name
+	base["num_episodes"] = int(num_episodes)
+
+	# Prompt builder: keep class/params but control hints
+	base["prompt_builder_cls"] = "src.prompt_builders.hardmath.HardMathPromptBuilder"
+	pb = dict(base.get("prompt_builder_params", {}))
+	pb["enable_hints"] = bool(enable_hints)
+	base["prompt_builder_params"] = pb
+
+	# Ensure only boxed reward (no penalties)
+	base["rewards"] = [
+		{"cls": "boxed_answer", "params": {"coefficient": 1.0, "log_thinking": False}}
+	]
+
+	# Give runs distinct, informative names
+	base["wandb_project"] = base.get("wandb_project", "judge_sft")
+	base["wandb_run_name"] = run_name
+
+	return OmegaConf.to_yaml(base)
+
+
+def make_hint_config_yaml(num_episodes: int, model_name: str, *, repo_root: Path) -> str:
+	return _make_config_yaml(enable_hints=True, num_episodes=num_episodes, model_name=model_name, repo_root=repo_root, run_name="hinted")
+
+
+def make_nohint_config_yaml(num_episodes: int, model_name: str, *, repo_root: Path) -> str:
+	return _make_config_yaml(enable_hints=False, num_episodes=num_episodes, model_name=model_name, repo_root=repo_root, run_name="nohint")
 
 
 def run_training_with_config(config_text: str, repo_root: Path) -> None:
@@ -268,7 +256,7 @@ def main() -> None:
 	rollouts_dir = repo_root / "rollouts"
 
 	# 1) Hinted run
-	hint_cfg = make_hint_config_yaml(args.episodes_hint, args.model_name)
+	hint_cfg = make_hint_config_yaml(args.episodes_hint, args.model_name, repo_root=repo_root)
 	run_training_with_config(hint_cfg, repo_root)
 
 	hinted = load_rollout_files(rollouts_dir)
@@ -281,7 +269,7 @@ def main() -> None:
 		print(f"Added {pos} positive rows from hinted rollouts to {out_path}")
 
 	# 2) No-hint run (this will clear previous rollouts internally)
-	nohint_cfg = make_nohint_config_yaml(args.episodes_nohint, args.model_name)
+	nohint_cfg = make_nohint_config_yaml(args.episodes_nohint, args.model_name, repo_root=repo_root)
 	run_training_with_config(nohint_cfg, repo_root)
 
 	nohint = load_rollout_files(rollouts_dir)
