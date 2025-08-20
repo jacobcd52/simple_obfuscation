@@ -1,13 +1,13 @@
 # Run python scripts/train.py --config mmlu.yaml
 
-model_name: "Qwen/Qwen3-4B"
+model_name: "Qwen/Qwen3-0.6B"
 
 batch_size: 1
 grad_accum_steps: 2
 num_episodes: 1600
 learning_rate: 1e-5
-thinking_max_tokens: 800
-output_max_tokens: 1000
+thinking_max_tokens: 200
+output_max_tokens: 300
 multi_gpu: "fsdp"
 use_mind_face: true
 

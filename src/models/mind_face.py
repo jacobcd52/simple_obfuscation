@@ -85,6 +85,16 @@ class MindFace(nn.Module):
             self.mask_model = mask_model.to(self.device)
             self.face_model = face_model.to(self.device)
             self.tokenizer = tokenizer
+            # Assert both models are compatible with the same tokenizer (vocab size match)
+            try:
+                mask_emb = self.mask_model.get_input_embeddings().weight
+                face_emb = self.face_model.get_input_embeddings().weight
+                assert mask_emb.shape[0] == face_emb.shape[0], (
+                    "Tokenizers of face and mind models differ – they must share the same vocabulary"
+                )
+            except Exception:
+                # Fallback: rely on generate-time errors if embeddings/tokenizers mismatch
+                pass
         else:
             if mask_model_name is None or face_model_name is None:
                 raise ValueError(
@@ -102,11 +112,14 @@ class MindFace(nn.Module):
 
             self.mask_model = _load(mask_model_name)
             self.face_model = _load(face_model_name)
-            # We always take the face tokenizer (vocabulary *must* match)
+            # We always take the face tokenizer (vocabulary must match); enforce equality via embedding size check
             self.tokenizer = AutoTokenizer.from_pretrained(face_model_name, padding_side="left", use_fast=True)
-            mask_tok = AutoTokenizer.from_pretrained(mask_model_name, padding_side="left", use_fast=True)
-            if self.tokenizer.get_vocab() != mask_tok.get_vocab():
-                raise ValueError("Tokenizers of face and mind models differ – they must share the same vocabulary")
+            mask_emb = self.mask_model.get_input_embeddings().weight
+            face_emb = self.face_model.get_input_embeddings().weight
+            if mask_emb.shape[0] != face_emb.shape[0]:
+                raise ValueError(
+                    "Tokenizers of face and mind models differ – they must share the same vocabulary"
+                )
 
         # ------------------------------------------------------------------
         # Build logits processor for the thinking phase

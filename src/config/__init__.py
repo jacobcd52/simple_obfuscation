@@ -37,7 +37,6 @@ class TrainConfig:
 
     # model / tokenizer
     model_name: str = "Qwen/Qwen3-4B"
-    padding_side: str = "left"
     enable_thinking: bool = True  # pass to tokenizer
 
     # prompt construction
