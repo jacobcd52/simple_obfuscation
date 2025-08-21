@@ -11,7 +11,7 @@ def mind_face_small():
     # vocabulary is guaranteed to match while keeping resource usage low.
     model_name = "Qwen/Qwen3-4B"
     return MindFace(
-        mask_model_name=model_name,
+        mind_model_name=model_name,
         face_model_name=model_name,
         batch_size=2,
         max_thinking_tokens=4,

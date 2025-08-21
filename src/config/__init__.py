@@ -83,10 +83,11 @@ class TrainConfig:
     # mask and the face sub-models are included in the optimiser so their
     # parameters are updated jointly.
     use_mind_face: bool = False
-    # Optional override names for the sub-models.  When *None*, we fall back
-    # to *model_name*.
-    mask_model_name: Optional[str] = None
+    """When true, enables two-model 'mind-face' generation."""
+    mind_model_name: Optional[str] = None
+    """Name of the 'mind' model (HF hub or local path)."""
     face_model_name: Optional[str] = None
+    """Name of the 'face' model (HF hub or local path)."""
 
     def __post_init__(self):
         # No additional post-initialisation logic required at present.

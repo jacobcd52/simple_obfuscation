@@ -38,7 +38,7 @@ class MindFace(nn.Module):
 
     Parameters
     ----------
-    mask_model_name : str
+    mind_model_name : str
         HuggingFace repository or local path of the model that should generate
         the chain-of-thought.
     face_model_name : str
@@ -62,11 +62,11 @@ class MindFace(nn.Module):
 
     def __init__(
         self,
-        mask_model_name: str | None = None,
+        mind_model_name: str | None = None,
         face_model_name: str | None = None,
         *,
         # Pre-loaded components (optional – useful for testing to avoid reloads)
-        mask_model: Any = None,
+        mind_model: Any = None,
         face_model: Any = None,
         tokenizer: Any = None,
         device: str | None = None,
@@ -81,24 +81,24 @@ class MindFace(nn.Module):
         # ------------------------------------------------------------------
         # Load or accept pre-created components
         # ------------------------------------------------------------------
-        if mask_model is not None and face_model is not None and tokenizer is not None:
-            self.mask_model = mask_model.to(self.device)
+        if mind_model is not None and face_model is not None and tokenizer is not None:
+            self.mind_model = mind_model.to(self.device)
             self.face_model = face_model.to(self.device)
             self.tokenizer = tokenizer
             # Assert both models are compatible with the same tokenizer (vocab size match)
             try:
-                mask_emb = self.mask_model.get_input_embeddings().weight
+                mind_emb = self.mind_model.get_input_embeddings().weight
                 face_emb = self.face_model.get_input_embeddings().weight
-                assert mask_emb.shape[0] == face_emb.shape[0], (
+                assert mind_emb.shape[0] == face_emb.shape[0], (
                     "Tokenizers of face and mind models differ – they must share the same vocabulary"
                 )
             except Exception:
                 # Fallback: rely on generate-time errors if embeddings/tokenizers mismatch
                 pass
         else:
-            if mask_model_name is None or face_model_name is None:
+            if mind_model_name is None or face_model_name is None:
                 raise ValueError(
-                    "When pre-loaded models are not provided, 'mask_model_name' and "
+                    "When pre-loaded models are not provided, 'mind_model_name' and "
                     "'face_model_name' must be specified."
                 )
 
@@ -110,13 +110,13 @@ class MindFace(nn.Module):
                 )
                 return model
 
-            self.mask_model = _load(mask_model_name)
+            self.mind_model = _load(mind_model_name)
             self.face_model = _load(face_model_name)
             # We always take the face tokenizer (vocabulary must match); enforce equality via embedding size check
             self.tokenizer = AutoTokenizer.from_pretrained(face_model_name, padding_side="left", use_fast=True)
-            mask_emb = self.mask_model.get_input_embeddings().weight
+            mind_emb = self.mind_model.get_input_embeddings().weight
             face_emb = self.face_model.get_input_embeddings().weight
-            if mask_emb.shape[0] != face_emb.shape[0]:
+            if mind_emb.shape[0] != face_emb.shape[0]:
                 raise ValueError(
                     "Tokenizers of face and mind models differ – they must share the same vocabulary"
                 )
@@ -167,7 +167,7 @@ class MindFace(nn.Module):
         prompt_lens = (model_inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
 
         # Generate hidden CoT via the *mind* model using the supplied logits processor
-        mask_out = self.mask_model.generate(
+        mind_out = self.mind_model.generate(
             **model_inputs,
             max_new_tokens=max_thinking_tokens,
             logits_processor=self.logit_processor,
@@ -175,7 +175,7 @@ class MindFace(nn.Module):
             output_scores=False,
             **gen_kwargs,
         )
-        mask_sequences = mask_out.sequences  # shape (B, prompt + think)
+        mind_sequences = mind_out.sequences  # shape (B, prompt + think)
 
         # --------------------------------------------------------------
         # Trim everything **after** the first </think>
@@ -183,7 +183,7 @@ class MindFace(nn.Module):
         end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
         trimmed_sequences: List[torch.Tensor] = []
         think_lens: List[int] = []
-        for seq, p_len in zip(mask_sequences, prompt_lens):
+        for seq, p_len in zip(mind_sequences, prompt_lens):
             seq_list = seq.tolist()
             try:
                 rel_idx = seq_list[p_len:].index(end_think_id)
@@ -252,7 +252,7 @@ class MindFace(nn.Module):
         # --------------------------------------------------------------
         # Decode generations for convenience
         # --------------------------------------------------------------
-        mask_generations: List[str] = []
+        mind_generations: List[str] = []
         face_generations: List[str] = []
         for b in range(B):
             p_len = prompt_lens[b].item()
@@ -263,11 +263,11 @@ class MindFace(nn.Module):
             think_slice = think_mask[b, start_mask_idx : start_mask_idx + gen_tokens.size(0)]
             face_slice = face_mask[b, start_mask_idx : start_mask_idx + gen_tokens.size(0)]
 
-            mask_ids = gen_tokens[think_slice].tolist()
+            mind_ids = gen_tokens[think_slice].tolist()
             face_ids = gen_tokens[face_slice].tolist()
 
-            mask_generations.append(
-                self.tokenizer.decode(mask_ids, skip_special_tokens=True).strip()
+            mind_generations.append(
+                self.tokenizer.decode(mind_ids, skip_special_tokens=True).strip()
             )
             face_generations.append(
                 self.tokenizer.decode(face_ids, skip_special_tokens=True).strip()
@@ -280,7 +280,7 @@ class MindFace(nn.Module):
             think_mask=think_mask,
             face_mask=face_mask,
             pad_lens=pad_lens,
-            mask_generations=mask_generations,
+            mind_generations=mind_generations,
             face_generations=face_generations,
         )
 
@@ -290,14 +290,14 @@ class MindFace(nn.Module):
     def forward(self, *args, **kwargs):  # type: ignore[override]
         """Run both models and average logits so every parameter receives grads."""
         face_out = self.face_model(*args, **kwargs)
-        mask_out = self.mask_model(*args, **kwargs)
+        mind_out = self.mind_model(*args, **kwargs)
 
         # Ensure both outputs have logits
-        if not (hasattr(face_out, "logits") and hasattr(mask_out, "logits")):
+        if not (hasattr(face_out, "logits") and hasattr(mind_out, "logits")):
             raise AttributeError("Underlying models must return logits for training")
 
         # Average logits – simple, unbiased combination
-        avg_logits = (face_out.logits + mask_out.logits) / 2.0
+        avg_logits = (face_out.logits + mind_out.logits) / 2.0
 
         # Re-use the exact *CausalLMOutput* type returned by the face model but
         # with combined logits so downstream code (loss, etc.) works unchanged.

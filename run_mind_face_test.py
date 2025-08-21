@@ -29,14 +29,14 @@ def main() -> None:  # noqa: D401 – simple script
     # ------------------------------------------------------------------
     # Initialise MindFace with identical *mind* and *face* models
     # ------------------------------------------------------------------
-    model_name = "Qwen/Qwen3-4B"
+    model_name = "Qwen/Qwen2-0.5B-Instruct"
 
     mind_face = MindFace(
-        mask_model_name=model_name,
+        mind_model_name=model_name,
         face_model_name=model_name,
         batch_size=2,  # Keep the batch size small to reduce memory usage
-        max_thinking_tokens=4,  # Budget for CoT generation
-        min_thinking_tokens=0,
+        max_thinking_tokens=30,  # Budget for CoT generation
+        min_thinking_tokens=5,
     )
 
     # ------------------------------------------------------------------

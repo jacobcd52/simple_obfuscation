@@ -132,7 +132,7 @@ class ReinforceTrainer:
             except Exception:
                 pass
 
-            mask_name = cfg.mask_model_name or cfg.model_name
+            mind_name = cfg.mind_model_name or cfg.model_name
             face_name = cfg.face_model_name or cfg.model_name
 
             # Shared tokenizer (face tokenizer). Force left padding. We require vocab parity and
@@ -149,7 +149,7 @@ class ReinforceTrainer:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
             if self._is_mind_rank:
-                mind = AutoModelForCausalLM.from_pretrained(mask_name, torch_dtype=dtype).to(device)
+                mind = AutoModelForCausalLM.from_pretrained(mind_name, torch_dtype=dtype).to(device)
                 try:
                     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # type: ignore
                     self.mind_model = FSDP(mind, process_group=self._pg_mind)
@@ -166,9 +166,9 @@ class ReinforceTrainer:
             # Assert tokenizer compatibility by comparing embedding sizes (mind/face)
             if self._is_mind_rank and self._is_face_rank:
                 # Single-rank world: both present
-                mask_emb = self.mind_model.get_input_embeddings().weight  # type: ignore[union-attr]
+                mind_emb = self.mind_model.get_input_embeddings().weight  # type: ignore[union-attr]
                 face_emb = self.face_model.get_input_embeddings().weight  # type: ignore[union-attr]
-                if mask_emb.shape[0] != face_emb.shape[0]:
+                if mind_emb.shape[0] != face_emb.shape[0]:
                     raise ValueError(
                         "Tokenizers of face and mind models differ – they must share the same vocabulary"
                     )
@@ -194,11 +194,11 @@ class ReinforceTrainer:
         elif getattr(cfg, "use_mind_face", False):
             from ..models.mind_face import MindFace
 
-            mask_name = cfg.mask_model_name or cfg.model_name
+            mind_name = cfg.mind_model_name or cfg.model_name
             face_name = cfg.face_model_name or cfg.model_name
 
             self.model = MindFace(
-                mask_model_name=mask_name,
+                mind_model_name=mind_name,
                 face_model_name=face_name,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 batch_size=cfg.batch_size,
