@@ -115,86 +115,24 @@ class ReinforceTrainer:
         # model / tokenizer (with optional MindFace wrapper)
         # ------------------------------------------------------------------
         if getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp":
-            # Mind-Face split across two FSDP subgroups
-            self._mf_split_fsdp = True
-            if not (dist.is_available() and dist.is_initialized()):
-                raise RuntimeError("FSDP mind-face split requires torch.distributed to be initialized")
-
-            world_size = dist.get_world_size()
-            rank = dist.get_rank()
-            mind_world = (world_size + 1) // 2
-            face_world = world_size // 2
-            self._mind_ranks = list(range(0, mind_world))
-            self._face_ranks = list(range(mind_world, world_size))
-            # Create disjoint process groups
-            self._pg_mind = dist.new_group(self._mind_ranks) if mind_world > 0 else None
-            self._pg_face = dist.new_group(self._face_ranks) if face_world > 0 else None
-            self._is_mind_rank = rank in self._mind_ranks
-            self._is_face_rank = rank in self._face_ranks
-            try:
-                print(f"[init rank{rank}] world_size={world_size} mind_ranks={self._mind_ranks} face_ranks={self._face_ranks} "
-                      f"is_mind_rank={self._is_mind_rank} is_face_rank={self._is_face_rank}", flush=True)
-            except Exception:
-                pass
+            # Unified FSDP across the whole world: both Mind and Face are sharded on all ranks.
+            from ..models.mind_face import MindFace
 
             mind_name = cfg.mind_model_name or cfg.model_name
             face_name = cfg.face_model_name or cfg.model_name
 
-            # Shared tokenizer (face tokenizer). Force left padding. We require vocab parity and
-            # enforce it via embedding size equality after loading models below.
-            self.tokenizer = AutoTokenizer.from_pretrained(face_name, padding_side="left", use_fast=True)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
+            # Build a MindFace wrapper that internally wraps both models with FSDP (single world group)
+            self.model = MindFace(
+                mind_model_name=mind_name,
+                face_model_name=face_name,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                batch_size=cfg.batch_size,
+                max_thinking_tokens=cfg.thinking_max_tokens or 0,
+                min_thinking_tokens=cfg.thinking_min_tokens,
+                use_fsdp=True,
+            )
 
-            # Load models only on their owning subgroup ranks
-            self.mind_model = None
-            self.face_model = None
-
-            dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-            if self._is_mind_rank:
-                mind = AutoModelForCausalLM.from_pretrained(mind_name, torch_dtype=dtype).to(device)
-                try:
-                    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # type: ignore
-                    self.mind_model = FSDP(mind, process_group=self._pg_mind)
-                except Exception:
-                    self.mind_model = mind
-            if self._is_face_rank:
-                face = AutoModelForCausalLM.from_pretrained(face_name, torch_dtype=dtype).to(device)
-                try:
-                    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # type: ignore
-                    self.face_model = FSDP(face, process_group=self._pg_face)
-                except Exception:
-                    self.face_model = face
-
-            # Assert tokenizer compatibility by comparing embedding sizes (mind/face)
-            if self._is_mind_rank and self._is_face_rank:
-                # Single-rank world: both present
-                mind_emb = self.mind_model.get_input_embeddings().weight  # type: ignore[union-attr]
-                face_emb = self.face_model.get_input_embeddings().weight  # type: ignore[union-attr]
-                if mind_emb.shape[0] != face_emb.shape[0]:
-                    raise ValueError(
-                        "Tokenizers of face and mind models differ – they must share the same vocabulary"
-                    )
-            else:
-                # Cross-rank assertion: gather sizes on rank 0 and compare
-                local_size = torch.tensor([
-                    (self.mind_model.get_input_embeddings().weight.shape[0] if self.mind_model is not None else -1),
-                    (self.face_model.get_input_embeddings().weight.shape[0] if self.face_model is not None else -1),
-                ], device=device, dtype=torch.int64)
-                sizes = [torch.zeros_like(local_size) for _ in range(dist.get_world_size())]
-                dist.all_gather(sizes, local_size)
-                # Extract first available mind and face sizes from gathered
-                mind_sz = next((int(s[0].item()) for s in sizes if int(s[0].item()) > 0), None)
-                face_sz = next((int(s[1].item()) for s in sizes if int(s[1].item()) > 0), None)
-                if mind_sz is not None and face_sz is not None and mind_sz != face_sz:
-                    raise ValueError(
-                        "Tokenizers of face and mind models differ – they must share the same vocabulary"
-                    )
-
-            # Expose a model attribute for utilities that expect .device
-            self.model = self.mind_model if self.mind_model is not None else self.face_model
+            self.tokenizer = self.model.tokenizer
 
         elif getattr(cfg, "use_mind_face", False):
             from ..models.mind_face import MindFace
@@ -287,14 +225,36 @@ class ReinforceTrainer:
         else:
             print("[Trainer/__init__] Skipping accelerator.prepare(model) for MindFace FSDP.", flush=True)
 
-        # Optimiser – must be created *after* model wrapping when using FSDP
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
-        )
-        # Distribute optimiser (safe in all modes)
-        self.optimizer = self.accelerator.prepare(self.optimizer)
-        if getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp":
-            print("[Trainer/__init__] Optimizer prepared.", flush=True)
+        # Optimisers – create after any wrapping
+        # In MindFace+FSDP mode we maintain two separate optimisers so we can
+        # step MIND and FACE sequentially without holding both grads in memory.
+        use_mindface_fsdp = getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp"
+        if use_mindface_fsdp:
+            from ..models.mind_face import MindFace  # local import
+            model_for_opt = self.model
+            if hasattr(model_for_opt, "module") and not isinstance(model_for_opt, MindFace):
+                model_for_opt = model_for_opt.module  # type: ignore[attr-defined]
+
+            # Create per-submodel optimizers
+            self.mind_optimizer = torch.optim.AdamW(
+                model_for_opt.mind_model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+            )
+            self.face_optimizer = torch.optim.AdamW(
+                model_for_opt.face_model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+            )
+            # Distribute optimizers
+            self.mind_optimizer = self.accelerator.prepare(self.mind_optimizer)
+            self.face_optimizer = self.accelerator.prepare(self.face_optimizer)
+            print("[Trainer/__init__] Mind/Face optimizers prepared.", flush=True)
+            self.optimizer = None  # type: ignore[assignment]
+        else:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+            )
+            # Distribute optimiser (safe in all modes)
+            self.optimizer = self.accelerator.prepare(self.optimizer)
+            if getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp":
+                print("[Trainer/__init__] Optimizer prepared.", flush=True)
 
         if self.accelerator.is_local_main_process:
             wandb.init(
@@ -313,7 +273,15 @@ class ReinforceTrainer:
         self.grad_accum_steps = max(1, cfg.grad_accum_steps)
         self._accum_counter = 0
         # Ensure gradients are cleared before first accumulation cycle
-        self.optimizer.zero_grad()
+        if use_mindface_fsdp:
+            # Clear both sets so we start clean
+            try:
+                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
+                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        else:
+            self.optimizer.zero_grad()  # type: ignore[union-attr]
 
         # Start watchdog to exit if stalled
         init_watchdog(timeout_s=10.0)
@@ -638,16 +606,18 @@ class ReinforceTrainer:
 
         loss_mat = -(advantages * logp_seg)  # (R,B)
         loss = loss_mat.mean()
-        return rewards_t, rollouts, loss
+        return rewards_t, rollouts, loss, advantages, apply_flags, num_rewards
 
-    def _backprop(self, loss, final_batch: bool = False) -> bool:
+    def _backprop(self, loss, final_batch: bool = False, skip_backward: bool = False) -> bool:
         """Backpropagate `loss` with gradient accumulation.
 
         Returns True if an optimiser step was performed, False otherwise.
         """
-        # Scale loss to account for gradient accumulation
-        loss = loss / self.grad_accum_steps
-        self.accelerator.backward(loss)
+        if not skip_backward:
+            # Scale loss to account for gradient accumulation
+            loss = loss / self.grad_accum_steps
+            self.accelerator.backward(loss)
+        # Count this micro-batch toward accumulation regardless
         self._accum_counter += 1
 
         stepped = False
@@ -660,6 +630,16 @@ class ReinforceTrainer:
             except AttributeError:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
             # Optimiser step & reset
+            try:
+                # Report grads memory before stepping
+                model_for_check = self.model
+                from ..models.mind_face import MindFace  # local import
+                if not isinstance(model_for_check, MindFace) and hasattr(model_for_check, "module"):
+                    model_for_check = model_for_check.module  # type: ignore[attr-defined]
+                if isinstance(model_for_check, MindFace) and hasattr(model_for_check, "report_memory"):
+                    model_for_check.report_memory("TRAIN/BWD:pre-step", include_grads=True)
+            except Exception:
+                pass
             self.optimizer.step()
             self.optimizer.zero_grad()
             self._accum_counter = 0
@@ -772,14 +752,101 @@ class ReinforceTrainer:
                     if not isinstance(model_for_check, MindFace) and hasattr(model_for_check, "module"):
                         model_for_check = model_for_check.module  # type: ignore[attr-defined]
 
-                    if isinstance(model_for_check, MindFace) and getattr(model_for_check, "is_fsdp", False):
+                    if isinstance(model_for_check, MindFace):
                         if "prompt_lens" not in gen_meta:
-                            raise RuntimeError("Missing prompt_lens metadata for MindFace FSDP logprob computation")
+                            raise RuntimeError("Missing prompt_lens metadata for MindFace logprob computation")
                         prompt_lens = gen_meta["prompt_lens"]
-                        logprob_thinking, logprob_output = model_for_check.compute_logprobs_dist(sequences, prompt_lens)
-                        print("[Trainer/train] Computed distributed logprobs.", flush=True)
-                        heartbeat("dist_logprobs_computed")
+                        # Compute rewards/advantages first using zero logprobs placeholder (will be recomputed for logging)
+                        zero = torch.zeros(len(batch.prompts), device=sequences.device, dtype=torch.float32)
+                        rewards_t, rollouts, _, advantages, apply_flags, num_rewards = self._compute_rewards(
+                            batch.prompts,
+                            sequences,
+                            batch.inputs,
+                            zero,
+                            zero,
+                            zero,
+                        )
+                        # --------------------------------------------------
+                        # Mind: compute grads -> clip -> zero special token grads -> step -> zero
+                        # --------------------------------------------------
+                        logprob_thinking = model_for_check.compute_logprobs_mind_only(sequences, prompt_lens)
+                        if advantages.numel() > 0 and apply_flags.any():
+                            adv_mind = advantages[apply_flags].mean(dim=0)
+                            mind_loss = - (adv_mind * logprob_thinking).mean()
+                            # Fresh grads for mind
+                            try:
+                                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            self.accelerator.backward(mind_loss)
+                            # Token-specific grad zeroing and clipping on mind params only
+                            try:
+                                from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
+                                _zero_tok_grads(model_for_check.mind_model, self.tokenizer)
+                            except Exception:
+                                pass
+                            try:
+                                self.accelerator.clip_grad_norm_(model_for_check.mind_model.parameters(), self.cfg.max_grad_norm)
+                            except AttributeError:
+                                torch.nn.utils.clip_grad_norm_(model_for_check.mind_model.parameters(), self.cfg.max_grad_norm)
+                            # Optional memory report before step
+                            try:
+                                if hasattr(model_for_check, "report_memory"):
+                                    model_for_check.report_memory("TRAIN/BWD:pre-step-mind", include_grads=True)
+                            except Exception:
+                                pass
+                            # Step and clear
+                            self.mind_optimizer.step()  # type: ignore[attr-defined]
+                            try:
+                                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                        # Encourage freeing activations ASAP
+                        try:
+                            del mind_loss
+                        except Exception:
+                            pass
+                        try:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+
+                        # --------------------------------------------------
+                        # Face: compute grads -> clip -> zero special token grads -> step -> zero
+                        # --------------------------------------------------
+                        logprob_output = model_for_check.compute_logprobs_face_only(sequences, prompt_lens)
+                        if advantages.numel() > 0 and (~apply_flags).any():
+                            adv_face = advantages[~apply_flags].mean(dim=0)
+                            face_loss = - (adv_face * logprob_output).mean()
+                            try:
+                                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            self.accelerator.backward(face_loss)
+                            try:
+                                from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
+                                _zero_tok_grads(model_for_check.face_model, self.tokenizer)
+                            except Exception:
+                                pass
+                            try:
+                                self.accelerator.clip_grad_norm_(model_for_check.face_model.parameters(), self.cfg.max_grad_norm)
+                            except AttributeError:
+                                torch.nn.utils.clip_grad_norm_(model_for_check.face_model.parameters(), self.cfg.max_grad_norm)
+                            try:
+                                if hasattr(model_for_check, "report_memory"):
+                                    model_for_check.report_memory("TRAIN/BWD:pre-step-face", include_grads=True)
+                            except Exception:
+                                pass
+                            self.face_optimizer.step()  # type: ignore[attr-defined]
+                            try:
+                                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                        # Summed logprobs for logging/analysis
                         logprob_total = logprob_thinking + logprob_output
+                        print("[Trainer/train] Mind/Face sequential steps done.", flush=True)
+                        heartbeat("mindface_segment_bwd_done")
                     else:
                         logprob_total, logprob_thinking, logprob_output = self._compute_logprobs(
                             sequences, batch.inputs
@@ -787,7 +854,7 @@ class ReinforceTrainer:
                         print("[Trainer/train] Computed single-model logprobs.", flush=True)
                         heartbeat("single_logprobs_computed")
 
-                    rewards_t, rollouts, loss = self._compute_rewards(
+                    rewards_t, rollouts, loss, advantages, apply_flags, num_rewards = self._compute_rewards(
                         batch.prompts,
                         sequences,
                         batch.inputs,
@@ -800,7 +867,12 @@ class ReinforceTrainer:
                     is_last_batch = (
                         global_prompts_processed + global_batch_size >= cfg.num_episodes
                     )
-                    stepped = self._backprop(loss, final_batch=is_last_batch)
+                    # For MindFace, we already stepped per segment; mark as stepped and reset accum counter
+                    if isinstance(model_for_check, MindFace):
+                        self._accum_counter = 0
+                        stepped = True
+                    else:
+                        stepped = self._backprop(loss, final_batch=is_last_batch)
                     print(f"[Trainer/train] Backprop done. stepped={stepped}", flush=True)
                     heartbeat("backprop_done")
 
@@ -831,7 +903,19 @@ class ReinforceTrainer:
                     heartbeat("oom")
                     # Best-effort cleanup and proceed to next gradient step
                     try:
-                        self.optimizer.zero_grad()
+                        # Zero any existing grads on both optimizers (MindFace) or single optimizer
+                        if getattr(self, "mind_optimizer", None) is not None:
+                            try:
+                                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                        if getattr(self, "face_optimizer", None) is not None:
+                            try:
+                                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                        if getattr(self, "optimizer", None) is not None:
+                            self.optimizer.zero_grad()  # type: ignore[union-attr]
                     except Exception:
                         pass
                     self._accum_counter = 0
