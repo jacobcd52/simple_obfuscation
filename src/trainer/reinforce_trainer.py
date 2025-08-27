@@ -981,28 +981,13 @@ class ReinforceTrainer:
         world_size = getattr(self.accelerator, "num_processes", 1)
 
         with tqdm(total=cfg.num_episodes, desc="Prompts processed", disable=not is_main_process) as pbar:
-            # Heartbeat helper
+            # Heartbeat removed
             def _start_heartbeat(tag: str, interval_sec: float = 2.0):
-                stop_ev = threading.Event()
-                def _hb():
-                    try:
-                        r = dist.get_rank() if dist.is_initialized() else 0
-                        w = dist.get_world_size() if dist.is_initialized() else 1
-                    except Exception:
-                        r, w = 0, 1
-                    t0 = time.time()
-                    tick = 0
-                    while not stop_ev.is_set():
-                        try:
-                            pass
-                        except Exception:
-                            pass
-                        stop_ev.wait(interval_sec)
-                        tick += 1
-                th = threading.Thread(target=_hb, daemon=True)
-                th.start()
-                return stop_ev
-            
+                class _Dummy:
+                    def set(self):
+                        return None
+                return _Dummy()
+
             # ------------------------------------------------------------------
             # Specialised FSDP path for Mind+Face with two-phase backward
             # ------------------------------------------------------------------
@@ -1042,26 +1027,20 @@ class ReinforceTrainer:
                             if world_size > 1 and dist.is_available() and dist.is_initialized():
                                 try:
                                     r = dist.get_rank()
-                                    hb1 = _start_heartbeat(f"waiting EarlyBarrier iter={self._iteration_idx} micro={micro_idx}")
                                     dist.barrier()
-                                    hb1.set()
                                 except Exception:
                                     pass
                             if world_size > 1 and dist.is_available() and dist.is_initialized():
                                 # Optional barrier once to check rank skew
                                 if not self._did_bs_reduce_barrier:
                                     try:
-                                        hb2 = _start_heartbeat(f"waiting BatchSizeReduce pre-barrier iter={self._iteration_idx} micro={micro_idx}")
                                         dist.barrier()
-                                        hb2.set()
                                     except Exception:
                                         pass
                                     self._did_bs_reduce_barrier = True
                                 bs_tensor = torch.tensor([local_batch_size], device=self.accelerator.device, dtype=torch.int64)
                                 try:
-                                    hb3 = _start_heartbeat(f"waiting all_reduce iter={self._iteration_idx} micro={micro_idx}")
                                     dist.all_reduce(bs_tensor, op=dist.ReduceOp.SUM)
-                                    hb3.set()
                                 except Exception:
                                     pass
                                 global_batch_size = int(bs_tensor.item())

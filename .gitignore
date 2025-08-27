@@ -1,3 +1,5 @@
+runs_logs
+
 # Ignore only rollout JSON files
 rollouts/*.json
 
