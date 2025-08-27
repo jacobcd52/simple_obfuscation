@@ -147,21 +147,60 @@ class MindFace(nn.Module):
         The API purposefully differs from HuggingFace's *generate* to better fit
         the two-stage procedure.  *ReinforceTrainer* handles this discrepancy.
         """
+        # Rank/world info for diagnostics
+        try:
+            import torch.distributed as dist  # type: ignore
+            _rank = dist.get_rank() if dist.is_initialized() else 0
+            _world = dist.get_world_size() if dist.is_initialized() else 1
+        except Exception:
+            _rank, _world = 0, 1
+
         # --------------------------------------------------------------
         # Stage 1 – MIND (chain-of-thought)
         # --------------------------------------------------------------
-        model_inputs = self.tokenizer(prompt_inputs, return_tensors="pt", padding=True).to(self.device)
+        # Determine per-rank device from the model parameters to avoid cross-device issues
+        try:
+            mask_param_device = next(self.mask_model.parameters()).device
+        except Exception:
+            mask_param_device = torch.device(self.device)
+        model_inputs = self.tokenizer(prompt_inputs, return_tensors="pt", padding=True)
+        
+        model_inputs = model_inputs.to(mask_param_device)
+        
         prompt_lens = (model_inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
 
         # Generate hidden CoT via the *mind* model using the supplied logits processor
-        mask_out = self.mask_model.generate(
-            **model_inputs,
-            max_new_tokens=max_thinking_tokens,
-            logits_processor=self.logit_processor,
-            return_dict_in_generate=True,
-            output_scores=False,
-            **gen_kwargs,
-        )
+        # If the submodel is FSDP-wrapped, temporarily gather full params for generation
+        try:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # type: ignore
+            _is_mask_fsdp = isinstance(self.mask_model, FSDP)
+        except Exception:
+            _is_mask_fsdp = False
+
+        if _is_mask_fsdp:
+            from torch.distributed.fsdp import FullyShardedDataParallel as _FSDP  # type: ignore
+            
+            with _FSDP.summon_full_params(self.mask_model, recurse=False):
+                
+                mask_out = self.mask_model.module.generate(  # type: ignore[attr-defined]
+                    **model_inputs,
+                    max_new_tokens=max_thinking_tokens,
+                    logits_processor=self.logit_processor,
+                    return_dict_in_generate=True,
+                    output_scores=False,
+                    **gen_kwargs,
+                )
+            
+        else:
+            
+            mask_out = self.mask_model.generate(
+                **model_inputs,
+                max_new_tokens=max_thinking_tokens,
+                logits_processor=self.logit_processor,
+                return_dict_in_generate=True,
+                output_scores=False,
+                **gen_kwargs,
+            )
         mask_sequences = mask_out.sequences  # shape (B, prompt + think)
 
         # --------------------------------------------------------------
@@ -194,8 +233,15 @@ class MindFace(nn.Module):
             padded_inputs.append(padded_seq)
             attention_masks.append((padded_seq != pad_id).long())
 
-        input_ids_face = torch.stack(padded_inputs).to(self.device)
-        attention_mask_face = torch.stack(attention_masks).to(self.device)
+        # Prepare FACE inputs on FACE model's device
+        try:
+            face_param_device = next(self.face_model.parameters()).device
+        except Exception:
+            face_param_device = torch.device(self.device)
+        input_ids_face = torch.stack(padded_inputs).to(face_param_device)
+        attention_mask_face = torch.stack(attention_masks).to(face_param_device)
+        
+        
 
         # --------------------------------------------------------------
         # Stage 2 – FACE (visible answer)
@@ -209,14 +255,37 @@ class MindFace(nn.Module):
             if hasattr(proc, "reset"):
                 proc.reset()
 
-        face_out = self.face_model.generate(
-            input_ids=input_ids_face,
-            attention_mask=attention_mask_face,
-            max_new_tokens=face_max_new_tokens,
-            return_dict_in_generate=True,
-            output_scores=False,
-            **gen_kwargs,
-        )
+        # Summon full params for the face model only for generation time
+        try:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # type: ignore
+            _is_face_fsdp = isinstance(self.face_model, FSDP)
+        except Exception:
+            _is_face_fsdp = False
+
+        if _is_face_fsdp:
+            from torch.distributed.fsdp import FullyShardedDataParallel as _FSDP  # type: ignore
+            
+            with _FSDP.summon_full_params(self.face_model, recurse=False):
+                
+                face_out = self.face_model.module.generate(  # type: ignore[attr-defined]
+                    input_ids=input_ids_face,
+                    attention_mask=attention_mask_face,
+                    max_new_tokens=face_max_new_tokens,
+                    return_dict_in_generate=True,
+                    output_scores=False,
+                    **gen_kwargs,
+                )
+            
+        else:
+            
+            face_out = self.face_model.generate(
+                input_ids=input_ids_face,
+                attention_mask=attention_mask_face,
+                max_new_tokens=face_max_new_tokens,
+                return_dict_in_generate=True,
+                output_scores=False,
+                **gen_kwargs,
+            )
         full_sequences = face_out.sequences  # (B, prompt + think + answer)
 
         # --------------------------------------------------------------

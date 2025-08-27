@@ -12,6 +12,11 @@ import inspect
 import os
 from pathlib import Path
 import gc
+import time
+import faulthandler
+import sys
+import os as _os  # alias for env prints without shadowing os imported above
+import threading
 from typing import Dict, List
 
 import torch
@@ -105,6 +110,18 @@ class ReinforceTrainer:
         else:
             raise ValueError(f"Unknown multi_gpu setting: {cfg.multi_gpu}")
 
+        # --------------------------------------------------------------
+        # Pre-loop diagnostics & heartbeat
+        # --------------------------------------------------------------
+        # Initialize sequence counter early (internal use)
+        self._collective_seq = 0
+        # Ensure current CUDA device is explicitly set for this process
+        if torch.cuda.is_available() and getattr(self.accelerator, "device", None) is not None:
+            try:
+                torch.cuda.set_device(self.accelerator.device)
+            except Exception:
+                pass
+
         # ------------------------------------------------------------------
         # model / tokenizer (with optional MindFace wrapper)
         # ------------------------------------------------------------------
@@ -191,34 +208,148 @@ class ReinforceTrainer:
 
         self.rollout_store = RolloutStore("rollouts")
 
-        # Prepare (wrap) the model for the chosen distributed strategy first
-        self.model = self.accelerator.prepare(self.model)
+        # Prepare/wrap models and create optimisers depending on mode
+        self.optimizer = None  # default; may be set below for single-model path
+        self.optimizer_mind = None
+        self.optimizer_face = None
 
-        # Optimiser – must be created *after* model wrapping when using FSDP
+        if getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp":
+            t_prep = time.perf_counter()
+            # FSDP-wrap the submodels individually and create separate optimisers
+            self.model.mask_model, self.model.face_model = self.accelerator.prepare(
+                self.model.mask_model, self.model.face_model
+            )
+            # submodels prepared
+            self.optimizer_mind = torch.optim.AdamW(
+                self.model.mask_model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+            )
+            self.optimizer_face = torch.optim.AdamW(
+                self.model.face_model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+            )
+            self.optimizer_mind, self.optimizer_face = self.accelerator.prepare(self.optimizer_mind, self.optimizer_face)
+            # Smoke-test barrier after prepare
+            try:
+                if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+                    backend = str(dist.get_backend()).lower()
+                    dev_ids = [torch.cuda.current_device()] if (backend == "nccl" and torch.cuda.is_available()) else None
+                    r = dist.get_rank(); w = dist.get_world_size()
+                    # GPU sync before any collective
+                    if torch.cuda.is_available():
+                        try:
+                            torch.cuda.synchronize()
+                        except Exception:
+                            pass
+                    self._collective_seq += 1
+                    t_b = time.perf_counter()
+                    if dev_ids is not None:
+                        dist.barrier(device_ids=dev_ids)
+                    else:
+                        dist.barrier()
+                    took = time.perf_counter()-t_b
+                    # Post-barrier comm probe (quiet)
+                    try:
+                        val = torch.tensor([r], device=self.accelerator.device, dtype=torch.int64)
+                        dist.all_reduce(val, op=dist.ReduceOp.SUM)
+                        gather_list = [torch.empty_like(val) for _ in range(w)]
+                        dist.all_gather(gather_list, val)
+                    except Exception:
+                        pass
+            except Exception as e:
+                pass
+        else:
+            # Default single-model path (or non-FSDP mind-face) – wrap container
+            t_prep = time.perf_counter()
+            self.model = self.accelerator.prepare(self.model)
+            # model prepared
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
         )
-        # Distribute optimiser
+        t_optprep = time.perf_counter()
         self.optimizer = self.accelerator.prepare(self.optimizer)
+        # optimizer prepared
+        try:
+            if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+                backend = str(dist.get_backend()).lower()
+                dev_ids = [torch.cuda.current_device()] if (backend == "nccl" and torch.cuda.is_available()) else None
+                # Skip this barrier when mind+face FSDP is active to avoid skew
+                if not (getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp"):
+                    # Warm-up all_reduce probe (quiet)
+                    try:
+                        self._collective_seq = getattr(self, "_collective_seq", 0) + 1
+                        warm = torch.tensor([dist.get_rank()], device=self.accelerator.device, dtype=torch.int64)
+                        dist.all_reduce(warm, op=dist.ReduceOp.SUM)
+                    except Exception:
+                        pass
+                    self._collective_seq = getattr(self, "_collective_seq", 0) + 1
+                    if dev_ids is not None:
+                        dist.barrier(device_ids=dev_ids)
+                    else:
+                        dist.barrier()
+        except Exception as e:
+            pass
 
-        if self.accelerator.is_local_main_process:
-            wandb.init(
-                project=cfg.wandb_project,
-                name=cfg.wandb_run_name,
-                config=cfg.__dict__,
-                mode=os.environ.get("WANDB_MODE", "online"),
-            )
-        else:
-            # Prevent extra runs from being created on the non-main ranks.
-            wandb.init(mode="disabled")
+        t_wb = time.perf_counter()
+        try:
+            if self.accelerator.is_local_main_process:
+                wandb.init(
+                    project=cfg.wandb_project,
+                    name=cfg.wandb_run_name,
+                    config=cfg.__dict__,
+                    mode=os.environ.get("WANDB_MODE", "online"),
+                )
+            else:
+                wandb.init(mode="disabled")
+        except Exception as e:
+            try:
+                wandb.init(mode="disabled")
+            except Exception:
+                pass
+        # Smoke barrier after wandb
+        try:
+            if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+                backend = str(dist.get_backend()).lower()
+                dev_ids = [torch.cuda.current_device()] if (backend == "nccl" and torch.cuda.is_available()) else None
+                r = dist.get_rank(); w = dist.get_world_size()
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                self._collective_seq += 1
+                t_b2 = time.perf_counter()
+                if dev_ids is not None:
+                    dist.barrier(device_ids=dev_ids)
+                else:
+                    dist.barrier()
+                took2 = time.perf_counter()-t_b2
+        except Exception as e:
+            pass
 
         # misc
         self.global_step = 0
         # Gradient accumulation helpers
         self.grad_accum_steps = max(1, cfg.grad_accum_steps)
         self._accum_counter = 0
+        # Diagnostics flags
+        self._did_bs_reduce_barrier = False
+        self._ran_comm_probe = False
+        self._iteration_idx = 0
+        self._collective_seq = 0
         # Ensure gradients are cleared before first accumulation cycle
-        self.optimizer.zero_grad()
+        if getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp":
+            self.optimizer_mind.zero_grad()  # type: ignore[union-attr]
+            self.optimizer_face.zero_grad()  # type: ignore[union-attr]
+        else:
+            self.optimizer.zero_grad()  # type: ignore[union-attr]
+
+        # Final pre-loop marker
+        # ready to train
+
+        # Env diagnostics
+        # env diagnostics removed
+
+        # Early small collective probes
+        # initial comm probe removed
 
     def _generate(self, *args, **kwargs):
         """
@@ -273,6 +404,14 @@ class ReinforceTrainer:
     def _next_batch(self, prompt_iter, tp):
         """Sample the next batch of prompts and tokenise them."""
         cfg = self.cfg
+        # Rank info for diagnostics
+        try:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            world = dist.get_world_size() if dist.is_initialized() else 1
+        except Exception:
+            rank, world = 0, 1
+        t_start = time.perf_counter()
+        
         prompts: List[Dict] = []
         for _ in range(cfg.batch_size):
             try:
@@ -281,12 +420,14 @@ class ReinforceTrainer:
                 # Restart the iterator when we reach the end of the prompt set
                 prompt_iter = iter(self.prompt_builder)
                 prompts.append(next(prompt_iter))
+        
 
         # Reset the logit processor state for the new batch
         tp.reset()
 
         # Build chat-formatted prompts using the tokenizer's chat template
         prompt_texts = []
+        t_chat = time.perf_counter()
         for p in prompts:
             # Extract the raw user message (strip any manually-added assistant tag)
             user_content = p["prompt"].split("\n<assistant>")[0]
@@ -296,8 +437,19 @@ class ReinforceTrainer:
                 tokenize=False,
             )
             prompt_texts.append(chat_str)
+        try:
+            lens = [len(s) for s in prompt_texts]
+            
+        except Exception:
+            pass
 
-        inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
+        t_tok = time.perf_counter()
+        inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True)
+        
+        t_move = time.perf_counter()
+        
+        inputs = inputs.to(self.model.device)
+        
 
         # Store raw prompt texts for potential MindFace generation.  We make a
         # *shallow* copy to avoid side-effects when the dict is later passed
@@ -317,11 +469,21 @@ class ReinforceTrainer:
         if not isinstance(model_for_check, MindFace) and hasattr(model_for_check, "module"):
             model_for_check = model_for_check.module  # type: ignore[attr-defined]
 
+        # Rank info
+        try:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            world = dist.get_world_size() if dist.is_initialized() else 1
+        except Exception:
+            rank, world = 0, 1
+        
+
         if isinstance(model_for_check, MindFace):
             # inputs are not required – we rely on prompt texts instead.
             # We expect that `inputs` contains *prompt_texts* provided under a
             # special key injected by `_next_batch`.
             prompt_texts = inputs.pop("_prompt_texts")  # type: ignore[arg-type]
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
             max_think = self.cfg.thinking_max_tokens or 0
             max_new = self.cfg.output_max_tokens or 512
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -337,6 +499,7 @@ class ReinforceTrainer:
                     max_new_tokens=max_new,
                     **safe_kwargs,
                 )
+            
             return generated.sequences
 
         # ----- Standard single-model path -----
@@ -411,6 +574,168 @@ class ReinforceTrainer:
         logprob_total = logprob_thinking + logprob_output
         return logprob_total, logprob_thinking, logprob_output
 
+    # ------------------------------------------------------------------
+    # Mind+Face specific logprob helpers (used in FSDP two-phase backward)
+    # ------------------------------------------------------------------
+    def _compute_logprob_thinking_mind(self, sequences, inputs):
+        """Compute summed log-probabilities of the thinking segment using the MIND model only."""
+        # Shift for LM likelihood
+        input_ids_full = sequences[:, :-1]
+        target_ids = sequences[:, 1:]
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            outputs = self.model.mask_model(input_ids_full)
+        logits_full = outputs.logits
+        logprobs_full = F.log_softmax(logits_full, dim=-1)
+        token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+
+        # Prompt lengths and masks
+        seq_len = sequences.shape[1]
+        arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
+        prompt_len_common = inputs["input_ids"].shape[1]
+        prompt_lens = (inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
+        mask_full = arange_seq.expand(sequences.size(0), -1) >= prompt_len_common
+        mask = mask_full[:, 1:]
+
+        # Segment at </think>
+        end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
+        B, Lm1 = token_logprobs.shape
+        logprob_thinking = torch.zeros(B, device=sequences.device)
+        for b in range(B):
+            seq_list = sequences[b].tolist()
+            prompt_len = prompt_lens[b].item()
+            try:
+                rel_idx = seq_list[prompt_len:].index(end_think_id)
+                end_idx = prompt_len + rel_idx
+            except ValueError:
+                end_idx = len(seq_list) - 1
+            target_end_idx = max(end_idx - 1, prompt_len)
+            think_mask_row = torch.zeros(Lm1, dtype=torch.bool, device=sequences.device)
+            think_mask_row[prompt_len : target_end_idx + 1] = True
+            # Consider only newly generated tokens
+            think_mask_row = think_mask_row & mask[b]
+            logprob_thinking[b] = (token_logprobs[b] * think_mask_row.float()).sum()
+        return logprob_thinking
+
+    def _compute_logprob_output_face(self, sequences, inputs):
+        """Compute summed log-probabilities of the output segment using the FACE model only."""
+        input_ids_full = sequences[:, :-1]
+        target_ids = sequences[:, 1:]
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            outputs = self.model.face_model(input_ids_full)
+        logits_full = outputs.logits
+        logprobs_full = F.log_softmax(logits_full, dim=-1)
+        token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+
+        seq_len = sequences.shape[1]
+        arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
+        prompt_len_common = inputs["input_ids"].shape[1]
+        prompt_lens = (inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
+        mask_full = arange_seq.expand(sequences.size(0), -1) >= prompt_len_common
+        mask = mask_full[:, 1:]
+
+        end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
+        B, Lm1 = token_logprobs.shape
+        logprob_output = torch.zeros(B, device=sequences.device)
+        for b in range(B):
+            seq_list = sequences[b].tolist()
+            prompt_len = prompt_lens[b].item()
+            try:
+                rel_idx = seq_list[prompt_len:].index(end_think_id)
+                end_idx = prompt_len + rel_idx
+            except ValueError:
+                end_idx = len(seq_list) - 1
+            target_end_idx = max(end_idx - 1, prompt_len)
+            output_mask_row = torch.zeros(Lm1, dtype=torch.bool, device=sequences.device)
+            output_mask_row[target_end_idx + 1 :] = True
+            output_mask_row = output_mask_row & mask[b]
+            logprob_output[b] = (token_logprobs[b] * output_mask_row.float()).sum()
+        return logprob_output
+
+    # ------------------------------------------------------------------
+    # Rewards-only evaluator used for two-phase backward
+    # ------------------------------------------------------------------
+    def _compute_rewards_only(self, prompts, sequences, inputs):
+        rollouts: List[Dict] = []
+        num_rewards = len(self.rewards)
+        reward_values = torch.zeros((num_rewards, len(prompts)), device=sequences.device)
+
+        has_async = any(inspect.iscoroutinefunction(r.__call__) for r in self.rewards)
+
+        if has_async:
+            async def _async_eval():
+                all_tasks = []
+                task_to_index = {}
+                rollout_data = []
+
+                for i, p in enumerate(prompts):
+                    response_text = self.tokenizer.decode(
+                        sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+                    )
+                    rollout = dict(p)
+                    rollout["response"] = response_text
+
+                    sync_results = []
+                    async_tasks = []
+                    for j, rwd in enumerate(self.rewards):
+                        if inspect.iscoroutinefunction(rwd.__call__):
+                            task = rwd(rollout)
+                            async_tasks.append((task, j))
+                            all_tasks.append(task)
+                            task_to_index[task] = (i, j)
+                        else:
+                            val = rwd(rollout)
+                            sync_results.append((j, val))
+                    rollout["_sync_results"] = sync_results
+                    rollout["_async_tags"] = async_tasks
+                    rollout_data.append(rollout)
+
+                async_vals = []
+                if all_tasks:
+                    async_vals = await asyncio.gather(*all_tasks, return_exceptions=True)
+
+                for i_idx, rollout in enumerate(rollout_data):
+                    for j, val in rollout["_sync_results"]:
+                        reward_values[j, i_idx] = float(val)
+
+                for task, res in zip(all_tasks, async_vals):
+                    i, j = task_to_index[task]
+                    if isinstance(res, Exception):
+                        res = 0.0
+                    reward_values[j, i] = float(res)
+
+                rewards_list = []
+                for i, rollout in enumerate(rollout_data):
+                    total_r = reward_values[:, i].sum().item()
+                    rollout.pop("_sync_results", None)
+                    rollout.pop("_async_tags", None)
+                    rollout["total_reward"] = total_r
+                    rollouts.append(rollout)
+                    rewards_list.append(total_r)
+                return rewards_list
+
+            rewards_list = asyncio.run(_async_eval())
+        else:
+            rewards_list: List[float] = []
+            for i, p in enumerate(prompts):
+                response_text = self.tokenizer.decode(
+                    sequences[i, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+                )
+                rollout = dict(p)
+                rollout["response"] = response_text
+                total_reward = 0.0
+                for j, rwd in enumerate(self.rewards):
+                    val = float(rwd(rollout))
+                    reward_values[j, i] = val
+                    total_reward += val
+                rollout["total_reward"] = total_reward
+                rollouts.append(rollout)
+                rewards_list.append(total_reward)
+
+        rewards_t = torch.tensor(rewards_list, device=sequences.device, dtype=torch.float32)
+        return reward_values, rewards_t, rollouts
+
     def _compute_rewards(
         self,
         prompts,
@@ -473,7 +798,6 @@ class ReinforceTrainer:
                 for task, res in zip(all_tasks, async_vals):
                     i, j = task_to_index[task]
                     if isinstance(res, Exception):
-                        print(f"[Warning] Async reward failed: {res}")
                         res = 0.0
                     reward_values[j, i] = float(res)
 
@@ -621,11 +945,32 @@ class ReinforceTrainer:
     def train(self):
         cfg = self.cfg
 
-        # Clear all previous rollouts at the start of training
-        self.rollout_store.clear_all_rollouts()
+        # Clear rollouts once (main process only) to avoid multi-rank race
+        if self.accelerator.is_local_main_process:
+            self.rollout_store.clear_all_rollouts()
+        if dist.is_available() and dist.is_initialized():
+            try:
+                dist.barrier()
+            except Exception:
+                pass
 
         # Build runtime helpers
+        try:
+            faulthandler.cancel_dump_traceback_later()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_preloop_hb_stop") and self._preloop_hb_stop is not None:
+                self._preloop_hb_stop.set()
+        except Exception:
+            pass
+        try:
+            faulthandler.enable()
+            faulthandler.dump_traceback_later(180, repeat=True)
+        except Exception:
+            pass
         tp = self._token_processor()
+        
         gen_kwargs = self._build_gen_kwargs(tp)
         from tqdm import tqdm  # local import to avoid cost when not training
 
@@ -636,6 +981,260 @@ class ReinforceTrainer:
         world_size = getattr(self.accelerator, "num_processes", 1)
 
         with tqdm(total=cfg.num_episodes, desc="Prompts processed", disable=not is_main_process) as pbar:
+            # Heartbeat helper
+            def _start_heartbeat(tag: str, interval_sec: float = 2.0):
+                stop_ev = threading.Event()
+                def _hb():
+                    try:
+                        r = dist.get_rank() if dist.is_initialized() else 0
+                        w = dist.get_world_size() if dist.is_initialized() else 1
+                    except Exception:
+                        r, w = 0, 1
+                    t0 = time.time()
+                    tick = 0
+                    while not stop_ev.is_set():
+                        try:
+                            pass
+                        except Exception:
+                            pass
+                        stop_ev.wait(interval_sec)
+                        tick += 1
+                th = threading.Thread(target=_hb, daemon=True)
+                th.start()
+                return stop_ev
+            
+            # ------------------------------------------------------------------
+            # Specialised FSDP path for Mind+Face with two-phase backward
+            # ------------------------------------------------------------------
+            if getattr(cfg, "use_mind_face", False) and cfg.multi_gpu == "fsdp":
+                saved_microbatches = []  # list of dicts with sequences/inputs/rewards/rollouts
+                episode_counter = 0
+                while global_prompts_processed < cfg.num_episodes:
+                    try:
+                        self._iteration_idx += 1
+                        
+                        # --------------------------------------------------
+                        # Accumulate K microbatches worth of rollouts
+                        # --------------------------------------------------
+                        saved_microbatches.clear()
+                        total_to_accumulate = self.grad_accum_steps
+                        total_logged_rollouts = []
+                        total_rewards_concat = []
+
+                        for micro_idx in range(total_to_accumulate):
+                            if global_prompts_processed >= cfg.num_episodes:
+                                break
+                            
+                            batch, prompt_iter = self._next_batch(prompt_iter, tp)
+
+                            # Compute global batch size across processes
+                            local_batch_size = len(batch.prompts)
+                            global_batch_size = local_batch_size
+                            # Optional jitter to perturb scheduling across ranks
+                            try:
+                                jitter_ms = int(_os.environ.get("DEBUG_JITTER_MS", "0"))
+                            except Exception:
+                                jitter_ms = 0
+                            if jitter_ms > 0:
+                                time.sleep(jitter_ms / 1000.0)
+
+                            # Early barrier right after sampling/tokenization to detect skew
+                            if world_size > 1 and dist.is_available() and dist.is_initialized():
+                                try:
+                                    r = dist.get_rank()
+                                    hb1 = _start_heartbeat(f"waiting EarlyBarrier iter={self._iteration_idx} micro={micro_idx}")
+                                    dist.barrier()
+                                    hb1.set()
+                                except Exception:
+                                    pass
+                            if world_size > 1 and dist.is_available() and dist.is_initialized():
+                                # Optional barrier once to check rank skew
+                                if not self._did_bs_reduce_barrier:
+                                    try:
+                                        hb2 = _start_heartbeat(f"waiting BatchSizeReduce pre-barrier iter={self._iteration_idx} micro={micro_idx}")
+                                        dist.barrier()
+                                        hb2.set()
+                                    except Exception:
+                                        pass
+                                    self._did_bs_reduce_barrier = True
+                                bs_tensor = torch.tensor([local_batch_size], device=self.accelerator.device, dtype=torch.int64)
+                                try:
+                                    hb3 = _start_heartbeat(f"waiting all_reduce iter={self._iteration_idx} micro={micro_idx}")
+                                    dist.all_reduce(bs_tensor, op=dist.ReduceOp.SUM)
+                                    hb3.set()
+                                except Exception:
+                                    pass
+                                global_batch_size = int(bs_tensor.item())
+
+                            sequences = self._generate_sequences(batch.inputs, gen_kwargs)
+                            
+
+                            # Rewards only (store for later loss computation)
+                            reward_values, rewards_t, rollouts = self._compute_rewards_only(
+                                batch.prompts, sequences, batch.inputs
+                            )
+                            
+
+                            saved_microbatches.append(
+                                {
+                                    "batch": batch,
+                                    "sequences": sequences,
+                                    "inputs": batch.inputs,
+                                    "reward_values": reward_values,
+                                    "rewards_t": rewards_t,
+                                    "rollouts": rollouts,
+                                }
+                            )
+
+                            # Book-keeping
+                            self._store_rollouts(rollouts)
+                            total_logged_rollouts.extend(rollouts)
+                            total_rewards_concat.append(rewards_t)
+
+                            global_prompts_processed += global_batch_size
+                            if is_main_process:
+                                remaining = cfg.num_episodes - pbar.n
+                                pbar.update(min(global_batch_size, remaining))
+
+                        # Nothing accumulated (done)
+                        if not saved_microbatches:
+                            break
+
+                        # --------------------------------------------------
+                        # Two-phase backward: MIND first, then FACE
+                        # --------------------------------------------------
+                        apply_flags = torch.tensor(self.rewards_apply_flags, device=self.accelerator.device, dtype=torch.bool)
+                        
+
+                        # MIND backward + step, then free memory
+                        mind_loss_running = 0.0
+                        try:
+                            if self.optimizer_mind is None:
+                                raise RuntimeError("Mind optimizer is not initialised")
+                            self.optimizer_mind.zero_grad()
+                            for itm in saved_microbatches:
+                                sequences_mb = itm["sequences"]
+                                inputs_mb = itm["inputs"]
+                                reward_values_mb = itm["reward_values"]  # (R,B)
+                                # Per-reward baseline -> advantage
+                                advantages_mb = reward_values_mb - reward_values_mb.mean(dim=1, keepdim=True)
+                                # Aggregate only thinking-applied rewards
+                                advantage_mind = advantages_mb[apply_flags].sum(dim=0) if apply_flags.any() else torch.zeros(sequences_mb.size(0), device=sequences_mb.device)
+                                logprob_thinking = self._compute_logprob_thinking_mind(sequences_mb, inputs_mb)
+                                loss_mind_mb = -(advantage_mind * logprob_thinking).mean()
+                                mind_loss_running += loss_mind_mb.item()
+                                self.accelerator.backward(loss_mind_mb / self.grad_accum_steps)
+                            
+                            try:
+                                zero_special_token_grads(self.model.mask_model, self.tokenizer)
+                            except Exception:
+                                pass
+                            # Use torch's clip to avoid Accelerate's parameter equality check issues
+                            torch.nn.utils.clip_grad_norm_(self.model.mask_model.parameters(), self.cfg.max_grad_norm)
+                            self.optimizer_mind.step()
+                            self.optimizer_mind.zero_grad()
+                            
+                            try:
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+                            try:
+                                gc.collect()
+                            except Exception:
+                                pass
+                        except (torch.cuda.OutOfMemoryError, RuntimeError):
+                            raise
+
+                        
+                        # FACE backward + step, then free memory
+                        face_loss_running = 0.0
+                        try:
+                            if self.optimizer_face is None:
+                                raise RuntimeError("Face optimizer is not initialised")
+                            self.optimizer_face.zero_grad()
+                            for itm in saved_microbatches:
+                                sequences_mb = itm["sequences"]
+                                inputs_mb = itm["inputs"]
+                                reward_values_mb = itm["reward_values"]  # (R,B)
+                                advantages_mb = reward_values_mb - reward_values_mb.mean(dim=1, keepdim=True)
+                                # Aggregate rewards that DO NOT apply to thinking -> apply to face output
+                                not_apply = (~apply_flags) if apply_flags.numel() > 0 else apply_flags
+                                advantage_face = advantages_mb[not_apply].sum(dim=0) if not_apply.any() else torch.zeros(sequences_mb.size(0), device=sequences_mb.device)
+                                logprob_output = self._compute_logprob_output_face(sequences_mb, inputs_mb)
+                                loss_face_mb = -(advantage_face * logprob_output).mean()
+                                face_loss_running += loss_face_mb.item()
+                                self.accelerator.backward(loss_face_mb / self.grad_accum_steps)
+                            
+                            try:
+                                zero_special_token_grads(self.model.face_model, self.tokenizer)
+                            except Exception:
+                                pass
+                            # Use torch's clip to avoid Accelerate's parameter equality check issues
+                            torch.nn.utils.clip_grad_norm_(self.model.face_model.parameters(), self.cfg.max_grad_norm)
+                            self.optimizer_face.step()
+                            self.optimizer_face.zero_grad()
+                            
+                            try:
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+                            try:
+                                gc.collect()
+                            except Exception:
+                                pass
+                        except (torch.cuda.OutOfMemoryError, RuntimeError):
+                            raise
+
+                        
+                        
+                        # Successful update across both models
+                        episode_counter += 1
+                        self.global_step += 1
+
+                        # Aggregate rewards for logging and compute combined loss
+                        rewards_t_total = torch.cat(total_rewards_concat) if total_rewards_concat else torch.tensor([], device=self.accelerator.device)
+                        combined_loss = torch.tensor((mind_loss_running + face_loss_running) / max(1, len(saved_microbatches)), device=self.accelerator.device)
+                        self._log_step(combined_loss, rewards_t_total, total_logged_rollouts, episode_counter)
+
+                        # Extra logs for per-branch losses
+                        if is_main_process:
+                            wandb.log(
+                                {
+                                    "loss/mind": mind_loss_running / max(1, len(saved_microbatches)),
+                                    "loss/face": face_loss_running / max(1, len(saved_microbatches)),
+                                },
+                                step=episode_counter,
+                            )
+
+                        # Proactive memory cleanup
+                        try:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                        try:
+                            gc.collect()
+                        except Exception:
+                            pass
+
+                    except (torch.cuda.OutOfMemoryError, RuntimeError):
+                        raise
+
+                # Upload saved rollouts to Weights & Biases as an artifact (main process only)
+                if cfg.save_rollouts_to_wandb and is_main_process:
+                    try:
+                        artifact = wandb.Artifact("rollouts", type="dataset")
+                        artifact.add_dir(str(self.rollout_store.dir))
+                        wandb.log_artifact(artifact)
+                    except Exception:
+                        pass
+                return
+
+            # ------------------------------------------------------------------
+            # Default path (single model or non-FSDP mind-face)
+            # ------------------------------------------------------------------
             while global_prompts_processed < cfg.num_episodes:
                 # Default skip size in case OOM occurs before batch is fully built
                 batch_size_for_skip = cfg.batch_size
@@ -693,7 +1292,7 @@ class ReinforceTrainer:
                     if not is_oom:
                         raise
 
-                    print("OOM error, skipping update")
+                    pass
                     # Best-effort cleanup and proceed to next gradient step
                     try:
                         self.optimizer.zero_grad()
@@ -731,5 +1330,5 @@ class ReinforceTrainer:
                 artifact = wandb.Artifact("rollouts", type="dataset")
                 artifact.add_dir(str(self.rollout_store.dir))
                 wandb.log_artifact(artifact)
-            except Exception as e:
-                print(f"[Warning] Failed to log rollouts to wandb: {e}")
+            except Exception:
+                pass

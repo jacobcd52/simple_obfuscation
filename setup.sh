@@ -82,6 +82,27 @@ fi
 source "$VENV_DIR/bin/activate"
 
 # ---------------------------------------------------------------------------
+# Project-default distributed env (persist into venv activation)
+# ---------------------------------------------------------------------------
+
+# Export for current session
+export NCCL_P2P_DISABLE=1
+export NCCL_SOCKET_IFNAME=eth0
+export TORCH_NCCL_BLOCKING_WAIT=1
+
+# Persist into venv activation for future shells
+ACTIVATE_FILE="$VENV_DIR/bin/activate"
+if ! grep -q "NCCL_P2P_DISABLE" "$ACTIVATE_FILE" >/dev/null 2>&1; then
+  {
+    echo "";
+    echo "# Project NCCL defaults (added by setup.sh)";
+    echo "export NCCL_P2P_DISABLE=1";
+    echo "export NCCL_SOCKET_IFNAME=eth0";
+    echo "export TORCH_NCCL_BLOCKING_WAIT=1";
+  } >> "$ACTIVATE_FILE"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Install project (editable) + dependencies
 # ---------------------------------------------------------------------------
 
