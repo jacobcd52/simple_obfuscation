@@ -1108,8 +1108,10 @@ class ReinforceTrainer:
                                 zero_special_token_grads(self.model.mask_model, self.tokenizer)
                             except Exception:
                                 pass
-                            # Use torch's clip to avoid Accelerate's parameter equality check issues
-                            torch.nn.utils.clip_grad_norm_(self.model.mask_model.parameters(), self.cfg.max_grad_norm)
+                            # Use torch's clip over parameters that have grads and disable foreach to avoid CUDA illegal memory access
+                            _params_mind = [p for p in self.model.mask_model.parameters() if p.grad is not None]
+                            if _params_mind:
+                                torch.nn.utils.clip_grad_norm_(_params_mind, self.cfg.max_grad_norm, foreach=False)
                             self.optimizer_mind.step()
                             self.optimizer_mind.zero_grad()
                             
@@ -1149,8 +1151,10 @@ class ReinforceTrainer:
                                 zero_special_token_grads(self.model.face_model, self.tokenizer)
                             except Exception:
                                 pass
-                            # Use torch's clip to avoid Accelerate's parameter equality check issues
-                            torch.nn.utils.clip_grad_norm_(self.model.face_model.parameters(), self.cfg.max_grad_norm)
+                            # Use torch's clip over parameters that have grads and disable foreach to avoid CUDA illegal memory access
+                            _params_face = [p for p in self.model.face_model.parameters() if p.grad is not None]
+                            if _params_face:
+                                torch.nn.utils.clip_grad_norm_(_params_face, self.cfg.max_grad_norm, foreach=False)
                             self.optimizer_face.step()
                             self.optimizer_face.zero_grad()
                             
