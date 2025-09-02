@@ -3,17 +3,18 @@
 model_name: "Qwen/Qwen3-8B"
 
 batch_size: 1
-grad_accum_steps: 2
+grad_accum_steps: 6
 num_episodes: 1600
 learning_rate: 1e-5
-thinking_max_tokens: 800
-output_max_tokens: 1000
+thinking_max_tokens: 8
+output_max_tokens: 10
 multi_gpu: "fsdp"
+
 use_mind_face: true
 
 save_rollouts_to_wandb: true
 wandb_project: "poly_1"
-wandb_run_name: "shog_test"
+wandb_run_name: "shog 14B"
 
 
 # Prompt builder – use the built-in MMLU dataset.
@@ -35,7 +36,6 @@ rewards:
     
   - cls: "expanded_polynomial"
     params:
-      coefficient: 0.0
+      coefficient: -1.0
       log_thinking: true
-      apply_to_thinking: true
 
