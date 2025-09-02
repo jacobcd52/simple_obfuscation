@@ -43,6 +43,7 @@ class TrainConfig:
     prompt_builder_cls: str = "src.prompt_builders.jsonl_prompt_builder.JsonlPromptBuilder"
     prompt_builder_params: dict = field(default_factory=dict)
 
+
     # RL specific
     batch_size: int = 2
     grad_accum_steps: int = 1
@@ -52,6 +53,7 @@ class TrainConfig:
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
 
+    padding_side: str = "left"
     # thinking / output budgets
     thinking_max_tokens: Optional[int] = None
     thinking_min_tokens: int = 0

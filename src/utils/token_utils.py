@@ -59,25 +59,37 @@ def zero_special_token_grads(model, tokenizer):
     if hasattr(model, "get_output_embeddings"):
         emb = model.get_output_embeddings()
         if hasattr(emb, "weight") and emb.weight.grad is not None:
-            for tid in token_ids:
-                if tid < emb.weight.grad.shape[0]:
-                    emb.weight.grad[tid].zero_()
+            try:
+                for tid in token_ids:
+                    if tid < emb.weight.grad.shape[0]:
+                        emb.weight.grad[tid].zero_()
+            except UserWarning as w:
+                # Guard against non-leaf grad warnings in some backends
+                print(f"[zero_special_token_grads] Warning while zeroing output emb grads: {w}", flush=True)
 
     # Zero input embedding gradients (if present)
     if hasattr(model, "get_input_embeddings"):
         emb_in = model.get_input_embeddings()
         if hasattr(emb_in, "weight") and emb_in.weight.grad is not None:
-            for tid in token_ids:
-                if tid < emb_in.weight.grad.shape[0]:
-                    emb_in.weight.grad[tid].zero_()
+            try:
+                for tid in token_ids:
+                    if tid < emb_in.weight.grad.shape[0]:
+                        emb_in.weight.grad[tid].zero_()
+            except UserWarning as w:
+                print(f"[zero_special_token_grads] Warning while zeroing input emb grads: {w}", flush=True)
 
     # Zero any other parameter gradients that are indexed by vocab (rare, but for completeness)
-    for _, param in model.named_parameters():
-        if param.grad is not None and param.grad.shape[0] >= max(token_ids) + 1:
-            # Only zero if the first dimension matches vocab size
-            for tid in token_ids:
-                if tid < param.grad.shape[0]:
-                    param.grad[tid].zero_()
+    for name, param in model.named_parameters():
+        # Skip FSDP flat params where first-dimension semantics are not vocab rows
+        if name.endswith("_flat_param"):
+            continue
+        if param.grad is not None and param.grad.dim() > 0 and param.grad.shape[0] >= max(token_ids) + 1:
+            try:
+                for tid in token_ids:
+                    if tid < param.grad.shape[0]:
+                        param.grad[tid].zero_()
+            except UserWarning as w:
+                print(f"[zero_special_token_grads] Warning while zeroing named param {name}: {w}", flush=True)
 
 
 # ---------------------------------------------------------------------------

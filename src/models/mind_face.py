@@ -217,35 +217,7 @@ class MindFace(nn.Module):
         self._fmt_bytes = _fmt_bytes              # type: ignore[attr-defined]
 
     def report_memory(self, phase: str, *, include_grads: bool = False) -> None:
-        """Print per-rank memory/dtype info for mind/face models and CUDA allocator."""
-        try:
-            rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else -1
-        except Exception:
-            rank = -1
-        try:
-            mind_b = self._bytes_of_params(self.mind_model)  # type: ignore[attr-defined]
-            face_b = self._bytes_of_params(self.face_model)  # type: ignore[attr-defined]
-            mind_d = ",".join(self._dtype_set(self.mind_model))  # type: ignore[attr-defined]
-            face_d = ",".join(self._dtype_set(self.face_model))  # type: ignore[attr-defined]
-            if include_grads:
-                mind_g = self._bytes_of_grads(self.mind_model)  # type: ignore[attr-defined]
-                face_g = self._bytes_of_grads(self.face_model)  # type: ignore[attr-defined]
-            else:
-                mind_g = face_g = 0
-            alloc = torch.cuda.memory_allocated(device=self.device) if torch.cuda.is_available() else 0
-            reserv = torch.cuda.memory_reserved(device=self.device) if torch.cuda.is_available() else 0
-            print(
-                f"[MEM][rank{rank}] {phase} | mind_params={self._fmt_bytes(mind_b)} (dtypes={mind_d}) "
-                f"face_params={self._fmt_bytes(face_b)} (dtypes={face_d}) "
-                f"mind_grads={self._fmt_bytes(mind_g)} face_grads={self._fmt_bytes(face_g)} "
-                f"cuda_alloc={self._fmt_bytes(alloc)} cuda_reserved={self._fmt_bytes(reserv)}",
-                flush=True,
-            )
-        except Exception as e:
-            try:
-                print(f"[MEM] Reporting failed at phase={phase}: {e}", flush=True)
-            except Exception:
-                pass
+        return
 
     # ------------------------------------------------------------------
     # Generation helper
@@ -439,7 +411,16 @@ class MindFace(nn.Module):
         targets = sequences[:, 1:]
         attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
 
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        try:
+            ctx = torch.autocast("cuda", dtype=torch.bfloat16) if torch.cuda.is_available() else torch.autocast("cpu")
+        except Exception:
+            class _NoOp:
+                def __enter__(self):
+                    return self
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+            ctx = _NoOp()
+        with ctx:
             mind_logits = self.mind_model(input_ids, attention_mask=attention_mask, use_cache=False).logits
         self.report_memory("TRAIN/FWD:post-mind", include_grads=False)
 
@@ -471,7 +452,16 @@ class MindFace(nn.Module):
         targets = sequences[:, 1:]
         attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
 
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        try:
+            ctx2 = torch.autocast("cuda", dtype=torch.bfloat16) if torch.cuda.is_available() else torch.autocast("cpu")
+        except Exception:
+            class _NoOp:
+                def __enter__(self):
+                    return self
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+            ctx2 = _NoOp()
+        with ctx2:
             face_logits = self.face_model(input_ids, attention_mask=attention_mask, use_cache=False).logits
         self.report_memory("TRAIN/FWD:post-face", include_grads=False)
 

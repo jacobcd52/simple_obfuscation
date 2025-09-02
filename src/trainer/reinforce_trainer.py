@@ -26,6 +26,7 @@ from ..utils.logit_processors import BatchThinkingTokenBudgetProcessor
 from ..prompt_builders import PromptBuilder
 from ..reward.base import RewardFunction
 from ..utils import zero_special_token_grads
+from ..utils.grad_clip import robust_clip_grad_norm
 from .rollout_store import RolloutStore
 from ..utils.debug_watchdog import init_watchdog, heartbeat
 
@@ -283,9 +284,7 @@ class ReinforceTrainer:
         else:
             self.optimizer.zero_grad()  # type: ignore[union-attr]
 
-        # Start watchdog to exit if stalled
-        init_watchdog(timeout_s=10.0)
-        heartbeat("trainer_init_done")
+        # Watchdog disabled
 
     def _generate(self, *args, **kwargs):
         """
@@ -646,6 +645,9 @@ class ReinforceTrainer:
             stepped = True
         return stepped
 
+    def _debug_grad_snapshot(self, module, module_name: str) -> None:
+        pass
+
     def _store_rollouts(self, rollouts: List[Dict]):
         for rollout in rollouts:
             self.rollout_store.save(rollout)
@@ -712,11 +714,9 @@ class ReinforceTrainer:
 
         # Build runtime helpers
         tp = self._token_processor()
-        print("[Trainer/train] Token processor created.", flush=True)
-        heartbeat("token_processor_created")
+        
         gen_kwargs = self._build_gen_kwargs(tp)
-        print("[Trainer/train] Generation kwargs built.", flush=True)
-        heartbeat("gen_kwargs_built")
+        
         from tqdm import tqdm  # local import to avoid cost when not training
 
         prompt_iter = iter(self.prompt_builder)
@@ -732,8 +732,7 @@ class ReinforceTrainer:
                 try:
                     batch, prompt_iter = self._next_batch(prompt_iter, tp)
                     batch_size_for_skip = len(batch.prompts)
-                    print(f"[Trainer/train] Built batch with {batch_size_for_skip} prompts.", flush=True)
-                    heartbeat("batch_built")
+                    
 
                     # Compute global batch size across all processes
                     local_batch_size = len(batch.prompts)
@@ -744,8 +743,7 @@ class ReinforceTrainer:
                         global_batch_size = int(bs_tensor.item())
 
                     sequences, gen_meta = self._generate_sequences(batch.inputs, gen_kwargs)
-                    print(f"[Trainer/train] Generated sequences shape={tuple(sequences.shape)}", flush=True)
-                    heartbeat("sequences_generated")
+                    
                     # If using MindFace FSDP, compute logprobs in a distributed segmented fashion
                     model_for_check = self.model
                     from ..models.mind_face import MindFace  # local import
@@ -785,10 +783,7 @@ class ReinforceTrainer:
                                 _zero_tok_grads(model_for_check.mind_model, self.tokenizer)
                             except Exception:
                                 pass
-                            try:
-                                self.accelerator.clip_grad_norm_(model_for_check.mind_model.parameters(), self.cfg.max_grad_norm)
-                            except AttributeError:
-                                torch.nn.utils.clip_grad_norm_(model_for_check.mind_model.parameters(), self.cfg.max_grad_norm)
+                            robust_clip_grad_norm(self.accelerator, model_for_check.mind_model.parameters(), self.cfg.max_grad_norm, module_name="mind")
                             # Optional memory report before step
                             try:
                                 if hasattr(model_for_check, "report_memory"):
@@ -829,10 +824,7 @@ class ReinforceTrainer:
                                 _zero_tok_grads(model_for_check.face_model, self.tokenizer)
                             except Exception:
                                 pass
-                            try:
-                                self.accelerator.clip_grad_norm_(model_for_check.face_model.parameters(), self.cfg.max_grad_norm)
-                            except AttributeError:
-                                torch.nn.utils.clip_grad_norm_(model_for_check.face_model.parameters(), self.cfg.max_grad_norm)
+                            robust_clip_grad_norm(self.accelerator, model_for_check.face_model.parameters(), self.cfg.max_grad_norm, module_name="face")
                             try:
                                 if hasattr(model_for_check, "report_memory"):
                                     model_for_check.report_memory("TRAIN/BWD:pre-step-face", include_grads=True)
@@ -845,14 +837,12 @@ class ReinforceTrainer:
                                 pass
                         # Summed logprobs for logging/analysis
                         logprob_total = logprob_thinking + logprob_output
-                        print("[Trainer/train] Mind/Face sequential steps done.", flush=True)
-                        heartbeat("mindface_segment_bwd_done")
+                        
                     else:
                         logprob_total, logprob_thinking, logprob_output = self._compute_logprobs(
                             sequences, batch.inputs
                         )
-                        print("[Trainer/train] Computed single-model logprobs.", flush=True)
-                        heartbeat("single_logprobs_computed")
+                        
 
                     rewards_t, rollouts, loss, advantages, apply_flags, num_rewards = self._compute_rewards(
                         batch.prompts,
@@ -873,8 +863,7 @@ class ReinforceTrainer:
                         stepped = True
                     else:
                         stepped = self._backprop(loss, final_batch=is_last_batch)
-                    print(f"[Trainer/train] Backprop done. stepped={stepped}", flush=True)
-                    heartbeat("backprop_done")
+                    
 
                     # Book-keeping
                     self._store_rollouts(rollouts)
@@ -896,11 +885,10 @@ class ReinforceTrainer:
                         "out of memory" in message or "cuda oom" in message
                     )
                     if not is_oom:
-                        print(f"[Trainer/train] Runtime error (non-OOM): {e}", flush=True)
+                        
                         raise
 
-                    print("OOM error, skipping update")
-                    heartbeat("oom")
+                    
                     # Best-effort cleanup and proceed to next gradient step
                     try:
                         # Zero any existing grads on both optimizers (MindFace) or single optimizer
