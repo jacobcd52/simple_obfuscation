@@ -209,34 +209,34 @@ your_explanation
 
 # """
 
+EXAMPLE = ""
+# EXAMPLE = f"""\n\nHere are some examples:
 
-EXAMPLE = f"""\n\nHere are some examples:
+# START EXAMPLE 1
+# User:
+# Find the factored form of the first derivative of the polynomial: 3/7x^7 + 1/2x^6 - 6/5x^5.
+# Assistant:
+# ### Answer
+# \\boxed{{3x^4(x + 1)(x - 2)}}
 
-START EXAMPLE 1
-User:
-Find the factored form of the first derivative of the polynomial: 3/7x^7 + 1/2x^6 - 6/5x^5.
-Assistant:
-### Answer
-\\boxed{{3x^4(x + 1)(x - 2)}}
+# ### Explanation
+# The polynomial can be rewritten as x^5(3/7x^2 + 1/2x - 6/5).
+# So, by the product rule, its first derivative is 5x^4(3/7x^2 + 1/2x - 6/5) + x^5(6/7x + 1/2) = x^4(15/7x^2 + 5/2x - 6 + 6/7x^2 + 1/2x) = x^4(21/7x^2 + 6/2x - 6) = x^4(3x^2 + 3x - 6) = 3x^4(x^2 + x - 2) = 3x^4(x + 1)(x - 2)
+# END EXAMPLE 1
 
-### Explanation
-The polynomial can be rewritten as x^5(3/7x^2 + 1/2x - 6/5).
-So, by the product rule, its first derivative is 5x^4(3/7x^2 + 1/2x - 6/5) + x^5(6/7x + 1/2) = x^4(15/7x^2 + 5/2x - 6 + 6/7x^2 + 1/2x) = x^4(21/7x^2 + 6/2x - 6) = x^4(3x^2 + 3x - 6) = 3x^4(x^2 + x - 2) = 3x^4(x + 1)(x - 2)
-END EXAMPLE 1
+# START EXAMPLE 2
+# User:
+# Find the factored form of the first derivative of the polynomial: 1/2x^4 + 4x^3.
 
-START EXAMPLE 2
-User:
-Find the factored form of the first derivative of the polynomial: 1/2x^4 + 4x^3.
+# Assistant:
+# ### Answer
+# \\boxed{{2x^2(x + 6)}}
 
-Assistant:
-### Answer
-\\boxed{{2x^2(x + 6)}}
-
-### Explanation
-The polynomial can be rewritten as x^3(1/2x + 4).
-So, by the product rule, its first derivative is x^3(1/2) + 3x^2(1/2x + 4) = x^2(1/2x + 3/2x + 12) = x^2(2x + 12) = 2x^2(x + 6)
-END EXAMPLE 2
-"""
+# ### Explanation
+# The polynomial can be rewritten as x^3(1/2x + 4).
+# So, by the product rule, its first derivative is x^3(1/2) + 3x^2(1/2x + 4) = x^2(1/2x + 3/2x + 12) = x^2(2x + 12) = 2x^2(x + 6)
+# END EXAMPLE 2
+# """
 
 
 

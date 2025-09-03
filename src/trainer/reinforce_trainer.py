@@ -277,12 +277,12 @@ class ReinforceTrainer:
         if use_mindface_fsdp:
             # Clear both sets so we start clean
             try:
-                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
-                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
+                self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
             except Exception:
                 pass
         else:
-            self.optimizer.zero_grad()  # type: ignore[union-attr]
+            self.optimizer.zero_grad(set_to_none=True)  # type: ignore[union-attr]
 
         # Watchdog disabled
 
@@ -363,7 +363,10 @@ class ReinforceTrainer:
             )
             prompt_texts.append(chat_str)
 
-        inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.model.device)
+        inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True)
+        # Keep tokenized inputs on CPU in MindFace mode; they are not used for generation
+        if not getattr(self.cfg, "use_mind_face", False):
+            inputs = inputs.to(self.model.device)
 
         # Store raw prompt texts for potential MindFace generation.  We make a
         # *shallow* copy to avoid side-effects when the dict is later passed
@@ -640,13 +643,73 @@ class ReinforceTrainer:
             except Exception:
                 pass
             self.optimizer.step()
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
+            try:
+                self._clear_module_grads(self.model)
+            except Exception:
+                pass
+            self._empty_cache_and_collect("post-standard-step")
             self._accum_counter = 0
             stepped = True
         return stepped
 
     def _debug_grad_snapshot(self, module, module_name: str) -> None:
         pass
+
+    def _log_backward(self, tag: str, loss: torch.Tensor) -> None:
+        return
+
+    def _clear_module_grads(self, module) -> None:
+        """Ensure gradients are fully released (set to None) for all parameters in module."""
+        try:
+            for param in module.parameters():
+                param.grad = None
+        except Exception:
+            pass
+
+    def _empty_cache_and_collect(self, location_tag: str) -> None:
+        """Run cuda.empty_cache and gc.collect, then optionally print memory usage."""
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        try:
+            gc.collect()
+        except Exception:
+            pass
+        return
+
+    def _offload_optimizer_state_to_cpu(self, optimizer, tag: str) -> None:
+        """Move optimizer state tensors to CPU to reduce persistent GPU memory between steps."""
+        try:
+            for state in getattr(optimizer, "state", {}).values():
+                if isinstance(state, dict):
+                    for k, v in list(state.items()):
+                        if torch.is_tensor(v) and v.is_cuda:
+                            try:
+                                state[k] = v.detach().to("cpu", non_blocking=True)
+                            except Exception:
+                                # Fall back to synchronous copy
+                                state[k] = v.detach().cpu()
+        except Exception:
+            pass
+        self._empty_cache_and_collect(f"offload-{tag}-opt-state")
+
+    def _ensure_optimizer_state_device(self, optimizer, device, tag: str) -> None:
+        """Ensure optimizer state tensors are on the target device just-in-time for the step."""
+        try:
+            for state in getattr(optimizer, "state", {}).values():
+                if isinstance(state, dict):
+                    for k, v in list(state.items()):
+                        if torch.is_tensor(v) and v.device != device:
+                            try:
+                                state[k] = v.to(device, non_blocking=True)
+                            except Exception:
+                                state[k] = v.to(device)
+        except Exception:
+            pass
 
     def _store_rollouts(self, rollouts: List[Dict]):
         for rollout in rollouts:
@@ -671,6 +734,19 @@ class ReinforceTrainer:
 
         # Reduce reward sum and count across processes (if distributed)
         if dist.is_available() and dist.is_initialized():
+            try:
+                backend_str = str(dist.get_backend()).lower()
+            except Exception:
+                backend_str = ""
+            # Select proper device for distributed reductions
+            if "nccl" in backend_str and torch.cuda.is_available():
+                reduce_device = torch.device("cuda", torch.cuda.current_device())
+            else:
+                reduce_device = torch.device("cpu")
+
+            reward_sum_global = reward_sum_global.to(reduce_device)
+            count_global = count_global.to(reduce_device)
+
             dist.all_reduce(reward_sum_global, op=dist.ReduceOp.SUM)
             dist.all_reduce(count_global, op=dist.ReduceOp.SUM)
 
@@ -684,6 +760,14 @@ class ReinforceTrainer:
             t_local = torch.tensor([float(v)], device=device, dtype=torch.float32)
             t_global = t_local.clone()
             if dist.is_available() and dist.is_initialized():
+                try:
+                    backend_str = str(dist.get_backend()).lower()
+                except Exception:
+                    backend_str = ""
+                if "nccl" in backend_str and torch.cuda.is_available():
+                    t_global = t_global.to(torch.device("cuda", torch.cuda.current_device()))
+                else:
+                    t_global = t_global.to(torch.device("cpu"))
                 dist.all_reduce(t_global, op=dist.ReduceOp.SUM)
             breakdown_means_global[f"reward/{k}"] = t_global.item() / total_count
 
@@ -764,79 +848,153 @@ class ReinforceTrainer:
                             zero,
                             zero,
                         )
+                        # Pre-initialize to avoid unbound variables if any segment is skipped
+                        logprob_thinking = torch.zeros(len(batch.prompts), device=sequences.device, dtype=torch.float32)
+                        logprob_output = torch.zeros(len(batch.prompts), device=sequences.device, dtype=torch.float32)
                         # --------------------------------------------------
                         # Mind: compute grads -> clip -> zero special token grads -> step -> zero
                         # --------------------------------------------------
-                        logprob_thinking = model_for_check.compute_logprobs_mind_only(sequences, prompt_lens)
-                        if advantages.numel() > 0 and apply_flags.any():
-                            adv_mind = advantages[apply_flags].mean(dim=0)
-                            mind_loss = - (adv_mind * logprob_thinking).mean()
-                            # Fresh grads for mind
-                            try:
-                                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
-                            self.accelerator.backward(mind_loss)
-                            # Token-specific grad zeroing and clipping on mind params only
-                            try:
-                                from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
-                                _zero_tok_grads(model_for_check.mind_model, self.tokenizer)
-                            except Exception:
-                                pass
-                            robust_clip_grad_norm(self.accelerator, model_for_check.mind_model.parameters(), self.cfg.max_grad_norm, module_name="mind")
-                            # Optional memory report before step
-                            try:
-                                if hasattr(model_for_check, "report_memory"):
-                                    model_for_check.report_memory("TRAIN/BWD:pre-step-mind", include_grads=True)
-                            except Exception:
-                                pass
-                            # Step and clear
-                            self.mind_optimizer.step()  # type: ignore[attr-defined]
-                            try:
-                                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
+                        with torch.autocast("cuda", dtype=torch.bfloat16):
+                            logprob_thinking = model_for_check.compute_logprobs_mind_only(sequences, prompt_lens)
+                            if advantages.numel() > 0 and apply_flags.any():
+                                adv_mind = advantages[apply_flags].mean(dim=0)
+                                mind_loss = - (adv_mind * logprob_thinking).mean()
+                                # Fresh grads for mind
+                                try:
+                                    self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                self.accelerator.backward(mind_loss)
+                                # Token-specific grad zeroing and clipping on mind params only
+                                try:
+                                    from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
+                                    _zero_tok_grads(model_for_check.mind_model, self.tokenizer)
+                                except Exception:
+                                    pass
+                                robust_clip_grad_norm(self.accelerator, model_for_check.mind_model.parameters(), self.cfg.max_grad_norm, module_name="mind")
+                                # Ensure optimizer state is on the correct device just-in-time for the step
+                                try:
+                                    mind_device = next(model_for_check.mind_model.parameters()).device
+                                    self._ensure_optimizer_state_device(self.mind_optimizer, mind_device, "mind")  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                # Optional memory report before step
+                                try:
+                                    if hasattr(model_for_check, "report_memory"):
+                                        model_for_check.report_memory("TRAIN/BWD:pre-step-mind", include_grads=True)
+                                except Exception:
+                                    pass
+                                # Step and clear
+                                self.mind_optimizer.step()  # type: ignore[attr-defined]
+                                try:
+                                    self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                # Offload optimizer state to CPU between steps
+                                try:
+                                    self._offload_optimizer_state_to_cpu(self.mind_optimizer, "mind")  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                # Ensure grads are released from the Mind submodule
+                                try:
+                                    self._clear_module_grads(model_for_check.mind_model)
+                                except Exception:
+                                    pass
+                                self._empty_cache_and_collect("post-mind-step")
                         # Encourage freeing activations ASAP
                         try:
                             del mind_loss
                         except Exception:
                             pass
                         try:
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
+                            del adv_mind
                         except Exception:
                             pass
+                        self._empty_cache_and_collect("between-mind-and-face")
 
                         # --------------------------------------------------
                         # Face: compute grads -> clip -> zero special token grads -> step -> zero
                         # --------------------------------------------------
-                        logprob_output = model_for_check.compute_logprobs_face_only(sequences, prompt_lens)
-                        if advantages.numel() > 0 and (~apply_flags).any():
-                            adv_face = advantages[~apply_flags].mean(dim=0)
-                            face_loss = - (adv_face * logprob_output).mean()
-                            try:
-                                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
-                            self.accelerator.backward(face_loss)
-                            try:
-                                from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
-                                _zero_tok_grads(model_for_check.face_model, self.tokenizer)
-                            except Exception:
-                                pass
-                            robust_clip_grad_norm(self.accelerator, model_for_check.face_model.parameters(), self.cfg.max_grad_norm, module_name="face")
-                            try:
-                                if hasattr(model_for_check, "report_memory"):
-                                    model_for_check.report_memory("TRAIN/BWD:pre-step-face", include_grads=True)
-                            except Exception:
-                                pass
-                            self.face_optimizer.step()  # type: ignore[attr-defined]
-                            try:
-                                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
-                        # Summed logprobs for logging/analysis
+                        with torch.autocast("cuda", dtype=torch.bfloat16):
+                            logprob_output = model_for_check.compute_logprobs_face_only(sequences, prompt_lens)
+                            if advantages.numel() > 0 and (~apply_flags).any():
+                                adv_face = advantages[~apply_flags].mean(dim=0)
+                                face_loss = - (adv_face * logprob_output).mean()
+                                try:
+                                    self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                self.accelerator.backward(face_loss)
+                                try:
+                                    from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
+                                    _zero_tok_grads(model_for_check.face_model, self.tokenizer)
+                                except Exception:
+                                    pass
+                                robust_clip_grad_norm(self.accelerator, model_for_check.face_model.parameters(), self.cfg.max_grad_norm, module_name="face")
+                                try:
+                                    face_device = next(model_for_check.face_model.parameters()).device
+                                    self._ensure_optimizer_state_device(self.face_optimizer, face_device, "face")  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                try:
+                                    if hasattr(model_for_check, "report_memory"):
+                                        model_for_check.report_memory("TRAIN/BWD:pre-step-face", include_grads=True)
+                                except Exception:
+                                    pass
+                                self.face_optimizer.step()  # type: ignore[attr-defined]
+                                try:
+                                    self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                # Offload optimizer state to CPU between steps
+                                try:
+                                    self._offload_optimizer_state_to_cpu(self.face_optimizer, "face")  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                                # Ensure grads are released from the Face submodule
+                                try:
+                                    self._clear_module_grads(model_for_check.face_model)
+                                except Exception:
+                                    pass
+                                self._empty_cache_and_collect("post-face-step")
+                        # Summed logprobs for logging/analysis (compute before freeing tensors)
                         logprob_total = logprob_thinking + logprob_output
+                        # Unconditionally move log-only tensors to CPU to minimize GPU residency
+                        use_cpu_for_logging = True
+                        try:
+                            logprob_thinking_cpu = logprob_thinking.detach().to("cpu")
+                            logprob_output_cpu = logprob_output.detach().to("cpu")
+                            logprob_total_cpu = logprob_total.detach().to("cpu")
+                            sequences_cpu = sequences.to("cpu")
+                        except Exception:
+                            logprob_thinking_cpu = logprob_thinking
+                            logprob_output_cpu = logprob_output
+                            logprob_total_cpu = logprob_total
+                            sequences_cpu = sequences
+                        try:
+                            del face_loss
+                        except Exception:
+                            pass
+                        # Only delete GPU tensors if we've offloaded replacements to CPU
+                        if use_cpu_for_logging:
+                            try:
+                                del logprob_output
+                            except Exception:
+                                pass
+                            try:
+                                del logprob_thinking
+                            except Exception:
+                                pass
+                        try:
+                            del adv_face
+                        except Exception:
+                            pass
+                        self._empty_cache_and_collect("post-face-memory-free")
+                        # Replace references with CPU tensors for the logging rewards pass
+                        sequences = sequences_cpu
+                        logprob_total = logprob_total_cpu
+                        logprob_thinking = logprob_thinking_cpu
+                        logprob_output = logprob_output_cpu
                         
                     else:
                         logprob_total, logprob_thinking, logprob_output = self._compute_logprobs(
@@ -868,6 +1026,8 @@ class ReinforceTrainer:
                     # Book-keeping
                     self._store_rollouts(rollouts)
                     self._log_step(loss, rewards_t, rollouts, episode_counter)
+                    # Final per-iteration memory guard
+                    self._empty_cache_and_collect("post-iteration")
 
                     # Counters / progress
                     episode_counter += 1
@@ -894,16 +1054,16 @@ class ReinforceTrainer:
                         # Zero any existing grads on both optimizers (MindFace) or single optimizer
                         if getattr(self, "mind_optimizer", None) is not None:
                             try:
-                                self.mind_optimizer.zero_grad()  # type: ignore[attr-defined]
+                                self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
                             except Exception:
                                 pass
                         if getattr(self, "face_optimizer", None) is not None:
                             try:
-                                self.face_optimizer.zero_grad()  # type: ignore[attr-defined]
+                                self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
                             except Exception:
                                 pass
                         if getattr(self, "optimizer", None) is not None:
-                            self.optimizer.zero_grad()  # type: ignore[union-attr]
+                            self.optimizer.zero_grad(set_to_none=True)  # type: ignore[union-attr]
                     except Exception:
                         pass
                     self._accum_counter = 0
