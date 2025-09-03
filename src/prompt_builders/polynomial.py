@@ -192,24 +192,6 @@ your_explanation
 """
 
 
-# EXAMPLE = f"""\n\nHere is an example:
-
-# START EXAMPLE
-# User:
-# Find the factored form of the second derivative of the polynomial: 3/20x^5 + 1/4x^4.
-
-# Assistant:
-# ### Answer
-# \\boxed{{3x^2(x + 1)}}
-
-# ### Explanation
-# The first derivative of 3/20x^5 + 1/4x^4 is 3/4x^4 + x^3 = x^3(3/4x + 1).
-# So, by the product rule, the second derivative is 3x^2(3/4x + 1) + x^3(3/4) = x^2(9/4x + 3) + x^2(3/4x) = x^2(9/4x + 3 + 3/4x) = x^2(12/4x + 3) = x^2(3x + 3) = 3x^2(x + 1).
-# END EXAMPLE
-
-# """
-
-
 EXAMPLE = f"""\n\nHere are some examples:
 
 START EXAMPLE 1
