@@ -428,6 +428,14 @@ class MindFace(nn.Module):
         mind_token_logprobs = mind_logprobs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
         vals: List[torch.Tensor] = []
+        # Build new-token mask based on common padded prompt length like trainer.generate
+        seq_len = sequences.size(1)
+        arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
+        # Common (left) padding aligns to the same absolute index for generated tokens
+        # Here, sequences already include padding on the left for face stage inputs.
+        # Use the max effective prompt length across batch as the common boundary.
+        prompt_len_common = int(prompt_lens.max().item()) if prompt_lens.numel() > 0 else 0
+        new_token_mask_target = (arange_seq.expand(sequences.size(0), -1) >= prompt_len_common)[:, 1:]
         end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
         for b in range(sequences.size(0)):
             seq_list = sequences[b].tolist()
@@ -438,9 +446,13 @@ class MindFace(nn.Module):
             except ValueError:
                 end_idx = len(seq_list) - 1
 
-            target_end_idx = max(end_idx - 1, p_len)
+            # Include first generated token; convert to target space
+            start_tgt_idx = max(int(p_len) - 1, 0)
+            target_end_idx = max(int(end_idx) - 1, start_tgt_idx)
             think_mask = torch.zeros_like(mind_token_logprobs[b], dtype=torch.bool)
-            think_mask[p_len - 1 : target_end_idx] = True
+            think_mask[start_tgt_idx : target_end_idx + 1] = True
+            # Intersect with new-token mask
+            think_mask = think_mask & new_token_mask_target[b]
             vals.append((mind_token_logprobs[b] * think_mask.float()).sum())
 
         return torch.stack(vals)
@@ -469,6 +481,11 @@ class MindFace(nn.Module):
         face_token_logprobs = face_logprobs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
         vals: List[torch.Tensor] = []
+        # Build new-token mask aligned to a common boundary to exclude left padding
+        seq_len = sequences.size(1)
+        arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
+        prompt_len_common = int(prompt_lens.max().item()) if prompt_lens.numel() > 0 else 0
+        new_token_mask_target = (arange_seq.expand(sequences.size(0), -1) >= prompt_len_common)[:, 1:]
         end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
         for b in range(sequences.size(0)):
             seq_list = sequences[b].tolist()
@@ -479,9 +496,13 @@ class MindFace(nn.Module):
             except ValueError:
                 end_idx = len(seq_list) - 1
 
-            target_end_idx = max(end_idx - 1, p_len)
+            # Include tokens strictly AFTER thinking end for output; convert to target space
+            start_tgt_idx = max(int(p_len) - 1, 0)
+            target_end_idx = max(int(end_idx) - 1, start_tgt_idx)
             output_mask = torch.zeros_like(face_token_logprobs[b], dtype=torch.bool)
-            output_mask[target_end_idx : ] = True
+            output_mask[target_end_idx + 1 :] = True
+            # Intersect with new-token mask
+            output_mask = output_mask & new_token_mask_target[b]
             vals.append((face_token_logprobs[b] * output_mask.float()).sum())
 
         return torch.stack(vals)

@@ -442,22 +442,21 @@ class ReinforceTrainer:
 
         token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
 
-        # Mask newly generated tokens (positions >= prompt length per-sample)
+        # Mask newly generated tokens (positions >= common prompt length)
         seq_len = sequences.shape[1]
         arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
         # Common padded prompt length – reproduces original behaviour
         prompt_len_common = inputs["input_ids"].shape[1]
         prompt_lens = (inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
         mask_full = arange_seq.expand(sequences.size(0), -1) >= prompt_len_common
-        mask = mask_full[:, 1:]  # align with targets
-        selected_logprobs = token_logprobs * mask.float()
+        new_token_mask_target = mask_full[:, 1:]  # align with targets (L-1)
 
         # ------------------------------------------------------------------
         # Split into thinking / output segments per sample
         # ------------------------------------------------------------------
         end_think_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
 
-        B, Lm1 = selected_logprobs.shape  # seq_len-1
+        B, Lm1 = token_logprobs.shape  # seq_len-1
 
         logprob_thinking = torch.zeros(B, device=sequences.device)
         logprob_output = torch.zeros(B, device=sequences.device)
@@ -472,14 +471,21 @@ class ReinforceTrainer:
             except ValueError:
                 end_idx = len(seq_list) - 1  # treat all generated as thinking
 
-            # Convert to target index space (length L-1) – target idx t predicts token t+1
-            target_end_idx = max(end_idx - 1, prompt_len)  # ensure non-negative
+            # Convert to target index space (length L-1). Include FIRST generated token
+            # Start at target index predicting the token at absolute position `prompt_len`.
+            start_tgt_idx = max(int(prompt_len) - 1, 0)
+            target_end_idx = max(int(end_idx) - 1, start_tgt_idx)
 
             think_mask_row = torch.zeros(Lm1, dtype=torch.bool, device=sequences.device)
             output_mask_row = torch.zeros(Lm1, dtype=torch.bool, device=sequences.device)
 
-            think_mask_row[prompt_len: target_end_idx + 1] = True
+            think_mask_row[start_tgt_idx : target_end_idx + 1] = True
             output_mask_row[target_end_idx + 1 :] = True
+
+            # Intersect with new-token mask to exclude right-padding
+            nt_mask_row = new_token_mask_target[b]
+            think_mask_row = think_mask_row & nt_mask_row
+            output_mask_row = output_mask_row & nt_mask_row
 
             logprob_thinking[b] = (token_logprobs[b] * think_mask_row.float()).sum()
             logprob_output[b] = (token_logprobs[b] * output_mask_row.float()).sum()
