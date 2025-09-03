@@ -36,6 +36,8 @@ class _DummySelf:
     def __init__(self):
         self.rewards = []
         self.tokenizer = _StubTokenizer()
+        # Match one flag per reward; default to applying to total (thinking+output)
+        self.rewards_apply_flags = []
 
 
 def test_compute_rewards_sync_and_async():
@@ -44,6 +46,7 @@ def test_compute_rewards_sync_and_async():
 
     trainer = _DummySelf()
     trainer.rewards = [_SyncReward(0.3), _AsyncReward(0.7)]
+    trainer.rewards_apply_flags = [True, True]
 
     prompts = [
         {"prompt": "Q1"},
@@ -58,9 +61,14 @@ def test_compute_rewards_sync_and_async():
         dtype=torch.long,
     )
     inputs = {"input_ids": torch.tensor([[1, 2], [5, 6]], dtype=torch.long)}
-    logprob_sums = torch.tensor([1.5, -0.5], dtype=torch.float32)
+    # Provide separate totals for thinking/output to match new signature.
+    logprob_total = torch.tensor([1.5, -0.5], dtype=torch.float32)
+    logprob_thinking = torch.tensor([0.4, -0.1], dtype=torch.float32)
+    logprob_output = logprob_total - logprob_thinking
 
-    rewards_t, rollouts, loss = ReinforceTrainer._compute_rewards(trainer, prompts, sequences, inputs, logprob_sums)
+    rewards_t, rollouts, loss, advantages, apply_flags, num_rewards = ReinforceTrainer._compute_rewards(
+        trainer, prompts, sequences, inputs, logprob_total, logprob_thinking, logprob_output
+    )
 
     # totals per sample = 0.3 + 0.7 = 1.0
     assert rewards_t.shape == torch.Size([2])
@@ -71,7 +79,10 @@ def test_compute_rewards_sync_and_async():
     assert "response" in rollouts[0] and isinstance(rollouts[0]["response"], str)
     assert "logprob_sum" in rollouts[0]
 
-    # loss is a scalar tensor
+    # loss is a scalar tensor; additional returns have expected shapes/types
     assert loss.ndim == 0
+    assert advantages.shape == (2, 2)
+    assert apply_flags.shape == (2,)
+    assert isinstance(num_rewards, int)
 
 

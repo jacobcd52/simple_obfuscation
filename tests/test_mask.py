@@ -37,22 +37,41 @@ class _DummyModel:
         return _DummyOutputs(logits)
 
 
+class _DummyTokenizer:
+    def __init__(self, pad_token_id: int, eos_token_id: int):
+        self.pad_token_id = pad_token_id
+        self._eos = eos_token_id
+
+    def encode(self, text: str, add_special_tokens: bool = False):  # noqa: ARG002
+        # Minimal support to find </think>; assign an arbitrary id distinct from pad/eos
+        if text == "</think>":
+            return [self._eos + 1]
+        return [self._eos]
+
+
 class _DummySelf:
-    def __init__(self, model):
+    def __init__(self, model, tokenizer):
         self.model = model
+        self.tokenizer = tokenizer
 
 
-def _compute_logprob_sums_via_real_mask(sequences: torch.LongTensor, inputs):
+def _compute_logprob_sums_via_real_mask(sequences: torch.LongTensor, inputs, real_tokenizer):
     # Build a dummy model large enough to index all target ids
     max_token_id = int(sequences.max().item())
     dummy_model = _DummyModel(vocab_size=max_token_id + 1)
-    dummy_self = _DummySelf(dummy_model)
+    # Create a minimal tokenizer with pad/eos ids matching the real tokenizer
+    pad_id = int(getattr(real_tokenizer, "pad_token_id", 0) or 0)
+    eos_fallback = int(getattr(real_tokenizer, "eos_token_id", max_token_id))
+    eos_id = eos_fallback if eos_fallback is not None else max_token_id
+    dummy_tok = _DummyTokenizer(pad_token_id=pad_id, eos_token_id=eos_id)
+    dummy_self = _DummySelf(dummy_model, dummy_tok)
 
     # Make torch.autocast a no-op (trainer uses cuda autocast)
     orig_autocast = torch.autocast
     try:
         torch.autocast = lambda *args, **kwargs: contextlib.nullcontext()
-        return ReinforceTrainer._compute_logprobs(dummy_self, sequences, inputs)
+        total, _thinking, _output = ReinforceTrainer._compute_logprobs(dummy_self, sequences, inputs)
+        return total
     finally:
         torch.autocast = orig_autocast
 
@@ -63,7 +82,7 @@ def test_mask_no_generation():
     inputs = tok(prompts, return_tensors="pt", padding=True)
     sequences = inputs.input_ids  # no generated tokens appended
 
-    logprob_sums = _compute_logprob_sums_via_real_mask(sequences, {"input_ids": inputs.input_ids})
+    logprob_sums = _compute_logprob_sums_via_real_mask(sequences, {"input_ids": inputs.input_ids}, tok)
     # With no generated tokens, sum should be exactly zero
     assert torch.allclose(logprob_sums, torch.zeros_like(logprob_sums)), (
         "Log-prob sum should be 0 when no generation tokens are present"
@@ -81,7 +100,7 @@ def test_mask_after_generation():
     generated = torch.full((1, num_generated), tok.eos_token_id, dtype=torch.long)
     sequences = torch.cat([inputs.input_ids, generated], dim=1)
 
-    logprob_sums = _compute_logprob_sums_via_real_mask(sequences, {"input_ids": inputs.input_ids})
+    logprob_sums = _compute_logprob_sums_via_real_mask(sequences, {"input_ids": inputs.input_ids}, tok)
 
     # With uniform logits, log_softmax per position equals -log(V)
     vocab_size = int(sequences.max().item()) + 1

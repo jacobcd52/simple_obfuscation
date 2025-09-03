@@ -66,9 +66,15 @@ def test_decoded_generations(mind_face_small):
 
     # Returned decoded strings should match lengths inferred from masks
     t_len = out.think_lens[0]
-    assert isinstance(out.mask_generations[0], str)
+    # Support current API: mind_generations (previously test expected mask_generations)
+    if hasattr(out, "mind_generations"):
+        mind_gen = out.mind_generations[0]
+    else:
+        # Fallback for any older interface naming
+        mind_gen = getattr(out, "mask_generations")[0]
+    assert isinstance(mind_gen, str)
     assert isinstance(out.face_generations[0], str)
     # At least one of the generations should be non-empty (usually both)
     assert (
-        len(out.mask_generations[0]) > 0 or len(out.face_generations[0]) > 0
+        len(mind_gen) > 0 or len(out.face_generations[0]) > 0
     ), "Decoded generations are empty"
