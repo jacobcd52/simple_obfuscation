@@ -1,18 +1,18 @@
-model_name: "Qwen/Qwen3-4B"
+model_name: "Qwen/Qwen3-8B"
 
-batch_size: 10
-grad_accum_steps: 1
+batch_size: 4
+grad_accum_steps: 3
 num_episodes: 20000
 learning_rate: 1e-5
-thinking_max_tokens: 300
+thinking_max_tokens: 500
 output_max_tokens: 600
-multi_gpu: "ddp"
+multi_gpu: "fsdp"
 
-wandb_project: "hardmath hints"
+wandb_project: "hardmath acronym"
 wandb_run_name: "qwen3-4b"
 
 # Prompt builder – DAFT-Math dataset via HuggingFace
-prompt_builder_cls: "src.prompt_builders.hardmath.HardMathPromptBuilder"
+prompt_builder_cls: "src.prompt_builders.hardmath_acronym.HardMathPromptBuilder"
 prompt_builder_params:
   hf_dataset: "metr-evals/daft-math"
   hf_split: "train"
@@ -26,9 +26,9 @@ rewards:
       coefficient: 1.0
       log_thinking: false
 
-  - cls: "judge_reward"
+  - cls: "regex_reward"
     params:
-      model: "gpt-4.1"
-      coefficient: -0.5
+      target_words: ["first", "letter", "acronym", "HINT", "hint", "Hint"]
+      coefficient: 0
+      max_clip: 2.0
       log_thinking: true
-      judge_prompt_template: "hard_math"
