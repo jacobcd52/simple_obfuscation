@@ -1,0 +1,37 @@
+model_name: "Qwen/Qwen3-8B"
+
+batch_size: 4
+grad_accum_steps: 4
+num_episodes: 3200
+learning_rate: 3e-5
+thinking_max_tokens: 300
+output_max_tokens: 600
+multi_gpu: "fsdp"
+
+wandb_project: "hardmath easyhints"
+wandb_run_name: "severed mindface 8B"
+
+use_mind_face: true
+
+# Prompt builder – DAFT-Math dataset via HuggingFace
+prompt_builder_cls: "src.prompt_builders.hardmath_easyhints.HardMathEasyHintsPromptBuilder"
+prompt_builder_params:
+  hf_dataset: "metr-evals/daft-math"
+  hf_split: "train"
+  enable_hints: True
+  use_model_filtered_dataset: True
+  model_name: Qwen3-4b
+
+rewards:
+  - cls: "boxed_answer"
+    params:
+      coefficient: 1.0
+      log_thinking: false
+
+  - cls: "judge_reward"
+    params:
+      model: "gpt-4.1"
+      coefficient: -2.0
+      log_thinking: true
+      judge_prompt_template: "hint_used_explicit"
+      apply_to_thinking: false
