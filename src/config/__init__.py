@@ -52,6 +52,8 @@ class TrainConfig:
     learning_rate: float = 5e-6
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
+    # For MindFace gradient accumulation: sub-batch size for backprop (defaults to batch_size)
+    backprop_batch_size: Optional[int] = None
 
     padding_side: str = "left"
     # thinking / output budgets

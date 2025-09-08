@@ -1,15 +1,16 @@
 model_name: "Qwen/Qwen3-8B"
 
-batch_size: 4
-grad_accum_steps: 4
+batch_size: 32
+grad_accum_steps: 1
+backprop_batch_size: 4
 num_episodes: 3200
-learning_rate: 3e-5
+learning_rate: 1e-5
 thinking_max_tokens: 300
 output_max_tokens: 600
 multi_gpu: "fsdp"
 
 wandb_project: "hardmath easyhints"
-wandb_run_name: "severed mindface 8B"
+wandb_run_name: "mindface 8B"
 
 use_mind_face: true
 
@@ -34,4 +35,4 @@ rewards:
       coefficient: -2.0
       log_thinking: true
       judge_prompt_template: "hint_used_explicit"
-      apply_to_thinking: false
+      apply_to_thinking: true

@@ -843,8 +843,14 @@ class ReinforceTrainer:
                     if isinstance(model_for_check, MindFace):
                         if "prompt_lens" not in gen_meta:
                             raise RuntimeError("Missing prompt_lens metadata for MindFace logprob computation")
+                        # Implement custom gradient accumulation so Mind and Face grads never coexist.
+                        # 1) Collect G microbatches (or until num_episodes exhausted): store CPU tensors to keep memory low.
+                        backprop_bs = self.cfg.backprop_batch_size if self.cfg.backprop_batch_size is not None else self.cfg.batch_size
+
+                        # We'll use local buffers for this accumulation cycle
+                        collected = []
+                        # Include the current microbatch first
                         prompt_lens = gen_meta["prompt_lens"]
-                        # Compute rewards/advantages first using zero logprobs placeholder (will be recomputed for logging)
                         zero = torch.zeros(len(batch.prompts), device=sequences.device, dtype=torch.float32)
                         rewards_t, rollouts, _, advantages, apply_flags, num_rewards = self._compute_rewards(
                             batch.prompts,
@@ -854,153 +860,257 @@ class ReinforceTrainer:
                             zero,
                             zero,
                         )
-                        # Pre-initialize to avoid unbound variables if any segment is skipped
-                        logprob_thinking = torch.zeros(len(batch.prompts), device=sequences.device, dtype=torch.float32)
-                        logprob_output = torch.zeros(len(batch.prompts), device=sequences.device, dtype=torch.float32)
-                        # --------------------------------------------------
-                        # Mind: compute grads -> clip -> zero special token grads -> step -> zero
-                        # --------------------------------------------------
-                        with torch.autocast("cuda", dtype=torch.bfloat16):
-                            logprob_thinking = model_for_check.compute_logprobs_mind_only(sequences, prompt_lens)
-                            if advantages.numel() > 0 and apply_flags.any():
-                                adv_mind = advantages[apply_flags].mean(dim=0)
-                                mind_loss = - (adv_mind * logprob_thinking).mean()
-                                # Fresh grads for mind
-                                try:
-                                    self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                                self.accelerator.backward(mind_loss)
-                                # Token-specific grad zeroing and clipping on mind params only
-                                try:
-                                    from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
-                                    _zero_tok_grads(model_for_check.mind_model, self.tokenizer)
-                                except Exception:
-                                    pass
-                                robust_clip_grad_norm(self.accelerator, model_for_check.mind_model.parameters(), self.cfg.max_grad_norm, module_name="mind")
-                                # Ensure optimizer state is on the correct device just-in-time for the step
-                                try:
-                                    mind_device = next(model_for_check.mind_model.parameters()).device
-                                    self._ensure_optimizer_state_device(self.mind_optimizer, mind_device, "mind")  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                                # Optional memory report before step
-                                try:
-                                    if hasattr(model_for_check, "report_memory"):
-                                        model_for_check.report_memory("TRAIN/BWD:pre-step-mind", include_grads=True)
-                                except Exception:
-                                    pass
-                                # Step and clear
-                                self.mind_optimizer.step()  # type: ignore[attr-defined]
-                                try:
-                                    self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                                # Offload optimizer state to CPU between steps
-                                try:
-                                    self._offload_optimizer_state_to_cpu(self.mind_optimizer, "mind")  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                                # Ensure grads are released from the Mind submodule
-                                try:
-                                    self._clear_module_grads(model_for_check.mind_model)
-                                except Exception:
-                                    pass
-                                self._empty_cache_and_collect("post-mind-step")
-                        # Encourage freeing activations ASAP
-                        try:
-                            del mind_loss
-                        except Exception:
-                            pass
-                        try:
-                            del adv_mind
-                        except Exception:
-                            pass
-                        self._empty_cache_and_collect("between-mind-and-face")
+                        collected.append({
+                            "prompts": batch.prompts,
+                            "inputs": batch.inputs,
+                            "sequences": sequences.detach().to("cpu"),
+                            "prompt_lens": prompt_lens.detach().to("cpu"),
+                            "advantages": advantages.detach().to("cpu"),
+                            "apply_flags": apply_flags.detach().to("cpu"),
+                            "rewards_t": rewards_t.detach().to("cpu"),
+                            "rollouts": rollouts,
+                        })
+
+                        # We have already advanced counters for this microbatch below; now collect remaining G-1
+                        remaining_accum = max(0, self.grad_accum_steps - 1)
+                        for _acc_idx in range(remaining_accum):
+                            # Stop if we've already reached the global limit
+                            if global_prompts_processed >= cfg.num_episodes:
+                                break
+                            # Sample next batch and generate
+                            nxt_batch, prompt_iter = self._next_batch(prompt_iter, tp)
+                            local_bs_nxt = len(nxt_batch.prompts)
+                            global_bs_nxt = local_bs_nxt
+                            if world_size > 1 and dist.is_available() and dist.is_initialized():
+                                bs_tensor2 = torch.tensor([local_bs_nxt], device=self.model.device, dtype=torch.int64)
+                                dist.all_reduce(bs_tensor2, op=dist.ReduceOp.SUM)
+                                global_bs_nxt = int(bs_tensor2.item())
+                            seq_nxt, meta_nxt = self._generate_sequences(nxt_batch.inputs, gen_kwargs)
+                            if "prompt_lens" not in meta_nxt:
+                                raise RuntimeError("Missing prompt_lens metadata for MindFace logprob computation")
+                            prompt_lens_nxt = meta_nxt["prompt_lens"]
+                            zero_nxt = torch.zeros(len(nxt_batch.prompts), device=seq_nxt.device, dtype=torch.float32)
+                            r_t, rls, _, adv_nxt, appl_flags_nxt, _ = self._compute_rewards(
+                                nxt_batch.prompts,
+                                seq_nxt,
+                                nxt_batch.inputs,
+                                zero_nxt,
+                                zero_nxt,
+                                zero_nxt,
+                            )
+                            collected.append({
+                                "prompts": nxt_batch.prompts,
+                                "inputs": nxt_batch.inputs,
+                                "sequences": seq_nxt.detach().to("cpu"),
+                                "prompt_lens": prompt_lens_nxt.detach().to("cpu"),
+                                "advantages": adv_nxt.detach().to("cpu"),
+                                "apply_flags": appl_flags_nxt.detach().to("cpu"),
+                                "rewards_t": r_t.detach().to("cpu"),
+                                "rollouts": rls,
+                            })
+
+                            # Update progress counters for this collected microbatch as well
+                            episode_counter += 1
+                            global_prompts_processed += global_bs_nxt
+                            if is_main_process:
+                                remaining = cfg.num_episodes - pbar.n
+                                pbar.update(min(global_bs_nxt, remaining))
 
                         # --------------------------------------------------
-                        # Face: compute grads -> clip -> zero special token grads -> step -> zero
+                        # 2) Mind backprop across all collected microbatches (sub-batches of size backprop_bs)
                         # --------------------------------------------------
-                        with torch.autocast("cuda", dtype=torch.bfloat16):
-                            logprob_output = model_for_check.compute_logprobs_face_only(sequences, prompt_lens)
-                            if advantages.numel() > 0 and (~apply_flags).any():
-                                adv_face = advantages[~apply_flags].mean(dim=0)
-                                face_loss = - (adv_face * logprob_output).mean()
                                 try:
-                                    self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                                    self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
                                 except Exception:
                                     pass
-                                self.accelerator.backward(face_loss)
-                                try:
-                                    from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
-                                    _zero_tok_grads(model_for_check.face_model, self.tokenizer)
-                                except Exception:
-                                    pass
-                                robust_clip_grad_norm(self.accelerator, model_for_check.face_model.parameters(), self.cfg.max_grad_norm, module_name="face")
-                                try:
-                                    face_device = next(model_for_check.face_model.parameters()).device
-                                    self._ensure_optimizer_state_device(self.face_optimizer, face_device, "face")  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                                try:
-                                    if hasattr(model_for_check, "report_memory"):
-                                        model_for_check.report_memory("TRAIN/BWD:pre-step-face", include_grads=True)
-                                except Exception:
-                                    pass
-                                self.face_optimizer.step()  # type: ignore[attr-defined]
-                                try:
-                                    self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                                # Offload optimizer state to CPU between steps
-                                try:
-                                    self._offload_optimizer_state_to_cpu(self.face_optimizer, "face")  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                                # Ensure grads are released from the Face submodule
-                                try:
-                                    self._clear_module_grads(model_for_check.face_model)
-                                except Exception:
-                                    pass
-                                self._empty_cache_and_collect("post-face-step")
-                        # Summed logprobs for logging/analysis (compute before freeing tensors)
-                        logprob_total = logprob_thinking + logprob_output
-                        # Unconditionally move log-only tensors to CPU to minimize GPU residency
-                        use_cpu_for_logging = True
+                        mind_device = None
                         try:
-                            logprob_thinking_cpu = logprob_thinking.detach().to("cpu")
-                            logprob_output_cpu = logprob_output.detach().to("cpu")
-                            logprob_total_cpu = logprob_total.detach().to("cpu")
-                            sequences_cpu = sequences.to("cpu")
+                            mind_device = next(model_for_check.mind_model.parameters()).device
                         except Exception:
-                            logprob_thinking_cpu = logprob_thinking
-                            logprob_output_cpu = logprob_output
-                            logprob_total_cpu = logprob_total
-                            sequences_cpu = sequences
+                            mind_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+                        # For logging per microbatch
+                        mind_losses_for_log = []
+                        logprob_thinking_all = []
+
+                        for mb in collected:
+                            adv = mb["advantages"].to(mind_device)
+                            apply = mb["apply_flags"].to(mind_device)
+                            B_i = int(adv.size(1)) if adv.numel() > 0 else len(mb["prompts"])  # type: ignore[index]
+                            # Pre-allocate CPU tensor for logprobs of this microbatch (for later logging)
+                            lpt_cpu = torch.zeros(B_i, dtype=torch.float32)
+                            mind_loss_avg_mb = 0.0
+
+                            if adv.numel() > 0 and apply.any():
+                                adv_mind = adv[apply].mean(dim=0)
+                                seq_cpu = mb["sequences"]  # CPU tensor
+                                pl_cpu = mb["prompt_lens"]  # CPU tensor
+                                for start in range(0, B_i, backprop_bs):
+                                    end = min(B_i, start + backprop_bs)
+                                    sb = end - start
+                                    seq_sub = seq_cpu[start:end].to(mind_device, non_blocking=True)
+                                    pl_sub = pl_cpu[start:end].to(mind_device, non_blocking=True)
+                                    adv_sub = adv_mind[start:end]
+                                    # compute_logprobs_* handle their own autocast; call directly
+                                    lpt = model_for_check.compute_logprobs_mind_only(seq_sub, pl_sub)
+                                    # Loss for this sub-batch
+                                    mind_loss_sub = - (adv_sub * lpt).mean()
+                                    # Scale by subbatch fraction and 1/G accumulation
+                                    scaled = mind_loss_sub * (sb / float(B_i)) / float(self.grad_accum_steps)
+                                    self.accelerator.backward(scaled)
+                                    # For logging, accumulate weighted average loss and store logprobs to CPU
+                                    mind_loss_avg_mb += float(mind_loss_sub.detach().to("cpu").item()) * (sb / float(B_i))
+                                    lpt_cpu[start:end] = lpt.detach().to("cpu")
+                                    # Free GPU tensors early
+                                    try:
+                                        del seq_sub, pl_sub, adv_sub, lpt, mind_loss_sub, scaled
+                                    except Exception:
+                                        pass
+                                    self._empty_cache_and_collect("mind-subbatch")
+                            # Store per-microbatch logging values
+                            mind_losses_for_log.append(mind_loss_avg_mb)
+                            logprob_thinking_all.append(lpt_cpu)
+
+                        # Token-specific grad zeroing and clipping on mind params only
                         try:
-                            del face_loss
+                            from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
+                            _zero_tok_grads(model_for_check.mind_model, self.tokenizer)
                         except Exception:
                             pass
-                        # Only delete GPU tensors if we've offloaded replacements to CPU
-                        if use_cpu_for_logging:
-                            try:
-                                del logprob_output
-                            except Exception:
-                                pass
-                            try:
-                                del logprob_thinking
-                            except Exception:
-                                pass
+                        robust_clip_grad_norm(self.accelerator, model_for_check.mind_model.parameters(), self.cfg.max_grad_norm, module_name="mind")
+                        # Ensure optimizer state is on device just-in-time for the step
                         try:
-                            del adv_face
+                            mind_device = next(model_for_check.mind_model.parameters()).device
+                            self._ensure_optimizer_state_device(self.mind_optimizer, mind_device, "mind")  # type: ignore[attr-defined]
                         except Exception:
                             pass
-                        self._empty_cache_and_collect("post-face-memory-free")
-                        # Replace references with CPU tensors for the logging rewards pass
-                        sequences = sequences_cpu
-                        logprob_total = logprob_total_cpu
-                        logprob_thinking = logprob_thinking_cpu
-                        logprob_output = logprob_output_cpu
+                        try:
+                            if hasattr(model_for_check, "report_memory"):
+                                model_for_check.report_memory("TRAIN/BWD:pre-step-mind", include_grads=True)
+                        except Exception:
+                            pass
+                        self.mind_optimizer.step()  # type: ignore[attr-defined]
+                        try:
+                            self.mind_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        # Offload optimizer state and clear grads from submodule
+                        try:
+                            self._offload_optimizer_state_to_cpu(self.mind_optimizer, "mind")  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        try:
+                            self._clear_module_grads(model_for_check.mind_model)
+                        except Exception:
+                            pass
+                        self._empty_cache_and_collect("post-mind-step")
+
+                        # --------------------------------------------------
+                        # 3) Face backprop across all collected microbatches (sub-batches)
+                        # --------------------------------------------------
+                        try:
+                            self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        face_device = None
+                        try:
+                            face_device = next(model_for_check.face_model.parameters()).device
+                        except Exception:
+                            face_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+                        face_losses_for_log = []
+                        logprob_output_all = []
+
+                        for mb in collected:
+                            adv = mb["advantages"].to(face_device)
+                            apply = mb["apply_flags"].to(face_device)
+                            B_i = int(adv.size(1)) if adv.numel() > 0 else len(mb["prompts"])  # type: ignore[index]
+                            lpo_cpu = torch.zeros(B_i, dtype=torch.float32)
+                            face_loss_avg_mb = 0.0
+
+                            if adv.numel() > 0 and (~apply).any():
+                                adv_face = adv[~apply].mean(dim=0)
+                                seq_cpu = mb["sequences"]
+                                pl_cpu = mb["prompt_lens"]
+                                for start in range(0, B_i, backprop_bs):
+                                    end = min(B_i, start + backprop_bs)
+                                    sb = end - start
+                                    seq_sub = seq_cpu[start:end].to(face_device, non_blocking=True)
+                                    pl_sub = pl_cpu[start:end].to(face_device, non_blocking=True)
+                                    adv_sub = adv_face[start:end]
+                                    # compute_logprobs_* handle their own autocast; call directly
+                                    lpo = model_for_check.compute_logprobs_face_only(seq_sub, pl_sub)
+                                    face_loss_sub = - (adv_sub * lpo).mean()
+                                    scaled = face_loss_sub * (sb / float(B_i)) / float(self.grad_accum_steps)
+                                    self.accelerator.backward(scaled)
+                                    face_loss_avg_mb += float(face_loss_sub.detach().to("cpu").item()) * (sb / float(B_i))
+                                    lpo_cpu[start:end] = lpo.detach().to("cpu")
+                                    try:
+                                        del seq_sub, pl_sub, adv_sub, lpo, face_loss_sub, scaled
+                                    except Exception:
+                                        pass
+                                    self._empty_cache_and_collect("face-subbatch")
+
+                            face_losses_for_log.append(face_loss_avg_mb)
+                            logprob_output_all.append(lpo_cpu)
+
+                        try:
+                            from ..utils import zero_special_token_grads as _zero_tok_grads  # local alias
+                            _zero_tok_grads(model_for_check.face_model, self.tokenizer)
+                        except Exception:
+                            pass
+                        robust_clip_grad_norm(self.accelerator, model_for_check.face_model.parameters(), self.cfg.max_grad_norm, module_name="face")
+                        try:
+                            face_device = next(model_for_check.face_model.parameters()).device
+                            self._ensure_optimizer_state_device(self.face_optimizer, face_device, "face")  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(model_for_check, "report_memory"):
+                                model_for_check.report_memory("TRAIN/BWD:pre-step-face", include_grads=True)
+                        except Exception:
+                            pass
+                        self.face_optimizer.step()  # type: ignore[attr-defined]
+                        try:
+                            self.face_optimizer.zero_grad(set_to_none=True)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        try:
+                            self._offload_optimizer_state_to_cpu(self.face_optimizer, "face")  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        try:
+                            self._clear_module_grads(model_for_check.face_model)
+                        except Exception:
+                            pass
+                        self._empty_cache_and_collect("post-face-step")
+
+                        # --------------------------------------------------
+                        # 4) Logging/storing for each collected microbatch
+                        # --------------------------------------------------
+                        base_episode = episode_counter - (len(collected) - 1)
+                        for idx, mb in enumerate(collected):
+                            # Reconstruct per-microbatch logprob tensors on CPU
+                            logprob_thinking_cpu = logprob_thinking_all[idx]
+                            logprob_output_cpu = logprob_output_all[idx]
+                            logprob_total_cpu = logprob_thinking_cpu + logprob_output_cpu
+
+                            # Approximate total loss for logging as (mind_avg + face_avg) for this microbatch
+                            loss_val = torch.tensor(
+                                (mind_losses_for_log[idx] if idx < len(mind_losses_for_log) else 0.0)
+                                + (face_losses_for_log[idx] if idx < len(face_losses_for_log) else 0.0),
+                                dtype=torch.float32,
+                            )
+
+                            # Store rollouts and log
+                            self._store_rollouts(mb["rollouts"])  # type: ignore[arg-type]
+                            self._log_step(loss_val, mb["rewards_t"], mb["rollouts"], base_episode + idx)
+
+                        # After finishing accumulation across G microbatches, mark step advanced
+                        stepped = True
+                        self._accum_counter = 0
+                        # Final per-iteration memory guard
+                        self._empty_cache_and_collect("post-iteration-mindface-accum")
                         
                     else:
                         logprob_total, logprob_thinking, logprob_output = self._compute_logprobs(
@@ -1008,30 +1118,30 @@ class ReinforceTrainer:
                         )
                         
 
-                    rewards_t, rollouts, loss, advantages, apply_flags, num_rewards = self._compute_rewards(
-                        batch.prompts,
-                        sequences,
-                        batch.inputs,
-                        logprob_total,
-                        logprob_thinking,
-                        logprob_output,
-                    )
+                    # For standard single-model path, compute rewards and loss as usual
+                    if not isinstance(model_for_check, MindFace):
+                        rewards_t, rollouts, loss, advantages, apply_flags, num_rewards = self._compute_rewards(
+                            batch.prompts,
+                            sequences,
+                            batch.inputs,
+                            logprob_total,
+                            logprob_thinking,
+                            logprob_output,
+                        )
 
                     # Gradient accumulation / optimiser step
                     is_last_batch = (
                         global_prompts_processed + global_batch_size >= cfg.num_episodes
                     )
-                    # For MindFace, we already stepped per segment; mark as stepped and reset accum counter
-                    if isinstance(model_for_check, MindFace):
-                        self._accum_counter = 0
-                        stepped = True
-                    else:
+                    # For MindFace, stepped is already set by the accumulation block above
+                    if not isinstance(model_for_check, MindFace):
                         stepped = self._backprop(loss, final_batch=is_last_batch)
                     
 
                     # Book-keeping
-                    self._store_rollouts(rollouts)
-                    self._log_step(loss, rewards_t, rollouts, episode_counter)
+                    if not isinstance(model_for_check, MindFace):
+                        self._store_rollouts(rollouts)
+                        self._log_step(loss, rewards_t, rollouts, episode_counter)
                     # Final per-iteration memory guard
                     self._empty_cache_and_collect("post-iteration")
 

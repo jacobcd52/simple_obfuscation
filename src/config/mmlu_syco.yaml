@@ -8,10 +8,12 @@ num_episodes: 3200
 learning_rate: 1e-5
 thinking_max_tokens: 300
 output_max_tokens: 600
-multi_gpu: "ddp"
+multi_gpu: "fsdp"
 
 wandb_project: "mmlu easy hints"
-wandb_run_name: "penalty 4B"
+wandb_run_name: "severed mind face 4B"
+
+use_mind_face: true
 
 # Prompt builder – use the built-in MMLU dataset.
 prompt_builder_cls: "src.prompt_builders.mmlu_syco.MmluSycoPromptBuilder"
@@ -31,6 +33,7 @@ rewards:
       coefficient: -2.0
       log_thinking: true
       judge_prompt_template: "hint_used"
+      apply_to_thinking: false
 
   # - cls: "regex_reward"
   #   params:
