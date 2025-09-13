@@ -1,7 +1,7 @@
 model_name: "Qwen/Qwen3-8B"
 
-batch_size: 32
-grad_accum_steps: 1
+batch_size: 8
+grad_accum_steps: 2
 backprop_batch_size: 4
 num_episodes: 3200
 learning_rate: 1e-5
@@ -10,9 +10,9 @@ output_max_tokens: 600
 multi_gpu: "fsdp"
 
 wandb_project: "hardmath easyhints"
-wandb_run_name: "mindface 8B"
+wandb_run_name: "severed 8B"
 
-use_mind_face: true
+use_mind_face: false
 
 # Prompt builder – DAFT-Math dataset via HuggingFace
 prompt_builder_cls: "src.prompt_builders.hardmath_easyhints.HardMathEasyHintsPromptBuilder"
@@ -30,9 +30,10 @@ rewards:
       log_thinking: false
 
   - cls: "judge_reward"
+    apply_to_thinking: false
     params:
       model: "gpt-4.1"
       coefficient: -2.0
       log_thinking: true
       judge_prompt_template: "hint_used_explicit"
-      apply_to_thinking: true
+      
