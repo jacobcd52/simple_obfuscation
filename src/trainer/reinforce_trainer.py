@@ -353,11 +353,15 @@ class ReinforceTrainer:
 
         # Build chat-formatted prompts using the tokenizer's chat template
         prompt_texts = []
+        user_contents_base = []
         for p in prompts:
             # Extract the raw user message (strip any manually-added assistant tag)
             user_content = p["prompt"].split("\n<assistant>")[0]
+            user_contents_base.append(user_content)
+            # Append generation-time suffix before assistant tags/special tokens
+            user_for_gen = user_content + (cfg.prompt_suffix_gen or "")
             chat_str = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": user_content}],
+                [{"role": "user", "content": user_for_gen}],
                 add_generation_prompt=True,
                 tokenize=False,
             )
@@ -373,6 +377,7 @@ class ReinforceTrainer:
         # into HF generate (the extra key is removed beforehand).
         inputs_with_texts = {k: v for k, v in inputs.items()}
         inputs_with_texts["_prompt_texts"] = prompt_texts  # type: ignore[assignment]
+        inputs_with_texts["_user_contents"] = user_contents_base  # type: ignore[assignment]
         return Batch(prompts, prompt_texts, inputs_with_texts), prompt_iter
 
     def _generate_sequences(self, inputs, gen_kwargs):
@@ -416,9 +421,10 @@ class ReinforceTrainer:
             return generated.sequences, meta
 
         # ----- Standard single-model path -----
-        safe_inputs = {k: v for k, v in inputs.items() if k != "_prompt_texts"}
+        safe_inputs = {k: v for k, v in inputs.items() if not str(k).startswith("_")}
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             generated = self._generate(**safe_inputs, **gen_kwargs)
+
         return generated.sequences, {}
 
     def _compute_logprobs(self, sequences, inputs):
@@ -431,10 +437,36 @@ class ReinforceTrainer:
         When the end marker is absent, the whole generation is considered
         thinking and *logprob_output* becomes zero.
         """
-        # Shift inputs/targets for language-modeling likelihood
-        input_ids_full = sequences[:, :-1]
-        target_ids = sequences[:, 1:]
+        # Rebuild forward-pass sequence using backprop suffix
+        seq_for_logprob = sequences
+        prompt_lens_source = inputs.get("input_ids")
 
+        use_backprop_suffix = False
+        user_contents = inputs.get("_user_contents")
+        if isinstance(user_contents, list) and len(user_contents) == sequences.size(0):
+            bp_texts = []
+            for uc in user_contents:
+                bp_texts.append(
+                    self.tokenizer.apply_chat_template(
+                        [{"role": "user", "content": uc + (self.cfg.prompt_suffix_backprop or "")}],
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
+                )
+            bp_inputs = self.tokenizer(bp_texts, return_tensors="pt", padding=True)
+            bp_inputs = bp_inputs.to(self.model.device)
+            # Extract generated tail from original sequences (post original common prompt length)
+            orig_prompt_len_common = inputs["input_ids"].shape[1]
+            gen_tail = sequences[:, orig_prompt_len_common:]
+            # Concatenate new prompt with the same generated tail
+            seq_for_logprob = torch.cat([bp_inputs["input_ids"], gen_tail], dim=1)
+            prompt_lens_source = bp_inputs["input_ids"]
+            use_backprop_suffix = True
+
+        # Shift inputs/targets for language-modeling likelihood using rebuilt sequence
+        input_ids_full = seq_for_logprob[:, :-1]
+        target_ids = seq_for_logprob[:, 1:]
+        
         with torch.autocast("cuda", dtype=torch.bfloat16):
             outputs = self.model(input_ids_full)
         logits_full = outputs.logits  # (batch, seq_len-1, vocab)
@@ -443,12 +475,12 @@ class ReinforceTrainer:
         token_logprobs = logprobs_full.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
 
         # Mask newly generated tokens (positions >= common prompt length)
-        seq_len = sequences.shape[1]
-        arange_seq = torch.arange(seq_len, device=sequences.device).unsqueeze(0)
-        # Common padded prompt length – reproduces original behaviour
-        prompt_len_common = inputs["input_ids"].shape[1]
-        prompt_lens = (inputs["input_ids"] != self.tokenizer.pad_token_id).sum(dim=1)
-        mask_full = arange_seq.expand(sequences.size(0), -1) >= prompt_len_common
+        seq_len = seq_for_logprob.shape[1]
+        arange_seq = torch.arange(seq_len, device=seq_for_logprob.device).unsqueeze(0)
+        # Common padded prompt length for the sequence used in forward
+        prompt_len_common = prompt_lens_source.shape[1]
+        prompt_lens = (prompt_lens_source != self.tokenizer.pad_token_id).sum(dim=1)
+        mask_full = arange_seq.expand(seq_for_logprob.size(0), -1) >= prompt_len_common
         new_token_mask_target = mask_full[:, 1:]  # align with targets (L-1)
 
         # ------------------------------------------------------------------
@@ -463,7 +495,7 @@ class ReinforceTrainer:
 
         for b in range(B):
             # Absolute position (in *sequences*) of the first </think> token.
-            seq_list = sequences[b].tolist()
+            seq_list = seq_for_logprob[b].tolist()
             prompt_len = prompt_lens[b].item()
             try:
                 rel_idx = seq_list[prompt_len:].index(end_think_id)

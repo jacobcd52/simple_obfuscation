@@ -15,6 +15,8 @@ from .judge_reward import JudgeReward
 from .boxed_answer_reward import BoxedAnswerReward  # noqa: F401  – optional
 from .factored_polynomial_reward import FactoredPolynomialReward  # noqa: F401  – optional
 from .expanded_polynomial_reward import ExpandedPolynomialReward  # noqa: F401  – optional
+from .large_number import LargeNumberReward  # noqa: F401  – optional
+from .specific_poly_reward import SpecificPolyReward  # noqa: F401  – optional
 
 _REGISTRY: Dict[str, Type[RewardFunction]] = {
     "regex_reward": RegexReward,
@@ -24,6 +26,8 @@ _REGISTRY: Dict[str, Type[RewardFunction]] = {
 _REGISTRY["boxed_answer"] = BoxedAnswerReward
 _REGISTRY["factored_polynomial"] = FactoredPolynomialReward
 _REGISTRY["expanded_polynomial"] = ExpandedPolynomialReward
+_REGISTRY["large_number"] = LargeNumberReward
+_REGISTRY["specific_poly"] = SpecificPolyReward
 
 
 def get_reward_class(name: str) -> Type[RewardFunction]:

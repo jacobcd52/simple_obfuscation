@@ -42,6 +42,9 @@ class TrainConfig:
     # prompt construction
     prompt_builder_cls: str = "src.prompt_builders.jsonl_prompt_builder.JsonlPromptBuilder"
     prompt_builder_params: dict = field(default_factory=dict)
+    # optional suffixes to append to prompts at different phases
+    prompt_suffix_gen: str = ""
+    prompt_suffix_backprop: str = ""
 
 
     # RL specific
