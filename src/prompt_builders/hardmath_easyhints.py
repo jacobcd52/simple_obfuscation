@@ -47,8 +47,6 @@ class HardMathEasyHintsPromptBuilder(PromptBuilder):
 		RNG seed for deterministic shuffling and hint selection.
 	enable_hints:
 		If True, prepend a hint that states the correct answer directly.
-	use_model_filtered_dataset:
-		When True, derive dataset as lukemarks/daft-math-filtered-<sanitized model name>.
 	model_name:
 		Model name used when use_model_filtered_dataset is True.
 	exclude_questions_path:
@@ -64,7 +62,6 @@ class HardMathEasyHintsPromptBuilder(PromptBuilder):
 		shuffle: bool = True,
 		seed: int = 0,
 		enable_hints: bool = True,
-		# When True, derive dataset as lukemarks/daft-math-filtered-<sanitized model name>
 		use_model_filtered_dataset: bool = False,
 		model_name: str | None = None,
 		exclude_questions_path: str | None = None,
